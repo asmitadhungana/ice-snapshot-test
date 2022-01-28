@@ -347,13 +347,20 @@ pub mod pallet {
                 };
                 log::info!("Processing a new claim request from offchain worker....");
 
-                // Actual processing of claim
-                let claim_request = Self::process_claim_request(next_claim_request);
+                // Actual processing of claim: Signed Transaction by Offchain worker
+                // let claim_request = Self::process_claim_request(next_claim_request);
 
-                if claim_request.is_some() {
-                    log::info!("Request processing passed...");
-                } else {
-                    log::info!("Request processing failed...");
+                // if claim_request.is_some() {
+                //     log::info!("Request processing passed...");
+                // } else {
+                //     log::info!("Request processing failed...");
+                // }
+
+                // CHANGED:
+                let res = Self::__process_claim_request(next_claim_request);
+
+                if let Err(e) = res {
+                    log::error!("Error: {:?}", e);
                 }
 
                 // TODO:
@@ -398,6 +405,23 @@ pub mod pallet {
 
             Self::deposit_event(Event::NewNumber(Some(who), number));
             Ok(())
+        }
+
+        // CHANGE: ADDED FUNCTION BELOW
+        #[pallet::weight(0)]
+        pub fn _transfer_amount(
+            origin: OriginFor<T>, 
+            receiver: T::AccountId, 
+            amount: u64
+        ) -> DispatchResultWithPostInfo{
+            // TODO:
+            // implement transfer logic
+            log::info!(
+                "Crediting account {:?} with amount of {} ",
+                receiver,
+                amount
+            );
+            Ok(().into())
         }
     }
 
@@ -523,6 +547,60 @@ pub mod pallet {
             Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
 
             Some(())
+        }
+
+        fn _process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), &'static str> {
+            let signer = Signer::<T, T::AuthorityId>::all_accounts();
+            if !signer.can_sign() {
+                return Err(
+                    "No local accounts available. Consider adding one via `author_insertKey` RPC.",
+                )?
+            }
+
+            // new_snapshot will have all the data required in SnapshotInfo structure
+            // this includes
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or("Fetch claim of failed.")?;
+
+            log::info!("Transfer details from server: {:?}", server_response);
+
+            let result = signer.send_signed_transaction(|_account| {
+                // MAYBE ERROR ???
+                Call::_transfer_amount{ receiver: claim_snapshot.ice_address.clone(), amount: server_response.amount.into()}
+            });
+
+            Ok(())
+        }
+
+
+        fn __process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), Error<T>> {
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+
+
+            // new_snapshot will have all the data required in SnapshotInfo structure
+            // this includes
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or(<Error<T>>::NoLocalAcctForSigning)?;
+
+            log::info!("Transfer details from server: {:?}", server_response);
+
+            let result = signer.send_signed_transaction(|_account| {
+                // MAYBE ERROR ???
+                Call::_transfer_amount{ receiver: claim_snapshot.ice_address.clone(), amount: server_response.amount.into() }
+            });
+
+            // Display error if the signed tx fails.
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                // Transaction is sent successfully
+                log::info!("Transaction sent successfully by {:?}", acc.id);
+                return Ok(());
+            }
+
+            // The case of `None`: no account is available for sending
+            log::error!("No local account available");
+            Err(<Error<T>>::NoLocalAcctForSigning)
         }
 
         // TODO:
