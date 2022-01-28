@@ -69,7 +69,7 @@ pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 #[frame_support::pallet]
 pub mod pallet {
     // pub use crate::{ServerResponse, SnapshotInfo, SNAPSHOT_STORAGE_KEY};
-    pub use crate::{SNAPSHOT_STORAGE_KEY};
+    pub use crate::SNAPSHOT_STORAGE_KEY;
 
     use core::convert::TryInto;
     use frame_support::error::LookupError;
@@ -120,13 +120,13 @@ pub mod pallet {
 
     pub mod crypto {
         use crate::KEY_TYPE;
+        use parity_scale_codec::alloc::string::String;
         use sp_core::sr25519::Signature as Sr25519Signature;
         use sp_runtime::{
             app_crypto::{app_crypto, sr25519},
             traits::Verify,
             MultiSignature, MultiSigner,
         };
-        use parity_scale_codec::alloc::string::String;
 
         app_crypto!(sr25519, KEY_TYPE);
 
@@ -155,13 +155,24 @@ pub mod pallet {
 
     #[derive(Encode, Decode, Clone, RuntimeDebug, scale_info::TypeInfo)]
     #[scale_info(skip_type_params(T))]
-
-    pub struct SnapshotInfo<T:Config> {
+    pub struct SnapshotInfo<T: Config> {
         icon_address: Vec<u8>,
         ice_address: <T as frame_system::Config>::AccountId,
         amount: u32,
         defi_user: bool,
         vesting_percentage: u32,
+    }
+
+    impl<T: Config> Default for SnapshotInfo<T> {
+        fn default() -> Self {
+            Self {
+                ice_address: <T as frame_system::Config>::AccountId::default(),
+                icon_address: sp_std::vec![],
+                amount: 0,
+                defi_user: false,
+                vesting_percentage: 0,
+            }
+        }
     }
 
     // Server response structure
@@ -177,7 +188,7 @@ pub mod pallet {
     }
 
     // implement builder pattern
-    impl SnapshotInfo<T> {
+    impl<T: Config> SnapshotInfo<T> {
         pub fn icon_address(mut self, val: Vec<u8>) -> Self {
             self.icon_address = val;
             self
@@ -249,12 +260,12 @@ pub mod pallet {
     pub struct Pallet<T>(_);
 
     // The pallet's runtime storage items.
-	// https://substrate.dev/docs/en/knowledgebase/runtime/storage
-	#[pallet::storage]
-	#[pallet::getter(fn numbers)]
-	// Learn more about declaring storage items:
-	// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
-	pub type Numbers<T> = StorageValue<_, VecDeque<u64>, ValueQuery>;
+    // https://substrate.dev/docs/en/knowledgebase/runtime/storage
+    #[pallet::storage]
+    #[pallet::getter(fn numbers)]
+    // Learn more about declaring storage items:
+    // https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
+    pub type Numbers<T> = StorageValue<_, VecDeque<u64>, ValueQuery>;
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
@@ -303,23 +314,19 @@ pub mod pallet {
 
             // TODO: Following block is temporary just to put some data in offchain storage
             {
-                let to_insert = SnapshotInfo::default()
-                    .ice_address(b"apple".to_vec())
-                    .icon_address(b"mango".to_vec());
+                let to_insert: SnapshotInfo<T> = SnapshotInfo::default();
                 let db_writer = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-                let _ = db_writer
-                    .mutate::<VecDeque<SnapshotInfo>, (), _>(move |storage| {
-                        let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                            prev_storage
-                        } else {
-                            VecDeque::new()
-                        };
+                let _ = db_writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
+                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
+                        prev_storage
+                    } else {
+                        VecDeque::new()
+                    };
 
-                        previous_storage.push_back(to_insert.clone());
+                    previous_storage.push_back(to_insert.clone());
 
-                        Ok(previous_storage)
-                    })
-                    .unwrap();
+                    Ok(previous_storage)
+                });
             }
 
             // Maximum number of request to run in this ocw
@@ -348,8 +355,6 @@ pub mod pallet {
                 } else {
                     log::info!("Request processing failed...");
                 }
-
-
 
                 // TODO:
                 // In both case we remove the snapshot
@@ -386,18 +391,17 @@ pub mod pallet {
         }
 
         #[pallet::weight(10000)]
-		pub fn submit_number_signed(origin: OriginFor<T>, number: u64) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			log::info!("submit_number_signed: ({}, {:?})", number, who);
-			Self::append_or_replace_number(number);
+        pub fn submit_number_signed(origin: OriginFor<T>, number: u64) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            log::info!("submit_number_signed: ({}, {:?})", number, who);
+            Self::append_or_replace_number(number);
 
-			Self::deposit_event(Event::NewNumber(Some(who), number));
-			Ok(())
-		}
+            Self::deposit_event(Event::NewNumber(Some(who), number));
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
-
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
             let ice_to_snapshot = <IceSnapshotMap<T>>::get(&signer);
 
@@ -419,9 +423,12 @@ pub mod pallet {
             Ok(())
         }
 
-        fn add_snapshot_to_offchain_db(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
+        fn add_snapshot_to_offchain_db(
+            ice_addr: &T::AccountId,
+            icon_address: &[u8],
+        ) -> DispatchResult {
             let to_insert = SnapshotInfo::default()
-                .ice_address(ice_addr)
+                .ice_address((*ice_addr).clone())
                 .icon_address(icon_address.to_vec());
 
             // StorageValueRef::local ( fork-aware db ) is not stable ( have issue )
@@ -433,71 +440,70 @@ pub mod pallet {
             // while assigning the claims we should pop from front
             // i.e start logic from front to maintain a fair queue system
             // First-in-first-out
-			// TODO:
-			// Wrap the storage inside lock while writing ( from here ) and reading ( from any other pallets )
-			// And set appropriate lock timeout
-            let writer_status = db_writer.mutate::<VecDeque<SnapshotInfo>, (), _>(move |storage| {
-                let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                    prev_storage
-                } else {
-                    VecDeque::new()
-                };
+            // TODO:
+            // Wrap the storage inside lock while writing ( from here ) and reading ( from any other pallets )
+            // And set appropriate lock timeout
+            let writer_status =
+                db_writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
+                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
+                        prev_storage
+                    } else {
+                        VecDeque::new()
+                    };
 
-                previous_storage.push_back(to_insert);
-                Ok(previous_storage)
-            });
+                    previous_storage.push_back(to_insert);
+                    Ok(previous_storage)
+                });
 
             ensure!(writer_status.is_ok(), Error::<T>::OffchainStoreError);
 
             Ok(())
         }
-    
 
         /// Append a new number to the tail of the list, removing an element from the head if reaching
-		///   the bounded length.
-		fn append_or_replace_number(number: u64) {
-			Numbers::<T>::mutate(|numbers| {
-				if numbers.len() == NUM_VEC_LEN {
-					let _ = numbers.pop_front();
-				}
-				numbers.push_back(number);
-				log::info!("Number vector: {:?}", numbers);
-			});
-		}
+        ///   the bounded length.
+        fn append_or_replace_number(number: u64) {
+            Numbers::<T>::mutate(|numbers| {
+                if numbers.len() == NUM_VEC_LEN {
+                    let _ = numbers.pop_front();
+                }
+                numbers.push_back(number);
+                log::info!("Number vector: {:?}", numbers);
+            });
+        }
 
-		fn offchain_signed_tx(block_number: T::BlockNumber) -> Result<(), Error<T>> {
-			// We retrieve a signer and check if it is valid.
-			//   Since this pallet only has one key in the keystore. We use `any_account()1 to
-			//   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
-			let signer = Signer::<T, T::AuthorityId>::any_account();
+        fn offchain_signed_tx(block_number: T::BlockNumber) -> Result<(), Error<T>> {
+            // We retrieve a signer and check if it is valid.
+            //   Since this pallet only has one key in the keystore. We use `any_account()1 to
+            //   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
+            let signer = Signer::<T, T::AuthorityId>::any_account();
 
-			// Translating the current block number to number and submit it on-chain
-			let number: u64 = block_number.try_into().unwrap_or(0);
+            // Translating the current block number to number and submit it on-chain
+            let number: u64 = block_number.try_into().unwrap_or(0);
 
-			// `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
-			//   - `None`: no account is available for sending transaction
-			//   - `Some((account, Ok(())))`: transaction is successfully sent
-			//   - `Some((account, Err(())))`: error occured when sending the transaction
-			let result = signer.send_signed_transaction(|_acct|
+            // `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
+            //   - `None`: no account is available for sending transaction
+            //   - `Some((account, Ok(())))`: transaction is successfully sent
+            //   - `Some((account, Err(())))`: error occured when sending the transaction
+            let result = signer.send_signed_transaction(|_acct|
 				// This is the on-chain function
-				Call::submit_number_signed{ number }
-			);
+				Call::submit_number_signed{ number });
 
-			// Display error if the signed tx fails.
-			if let Some((acc, res)) = result {
-				if res.is_err() {
-					log::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
-					return Err(<Error<T>>::OffchainSignedTxError);
-				}
-				// Transaction is sent successfully
+            // Display error if the signed tx fails.
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                // Transaction is sent successfully
                 log::info!("Transaction sent successfully by {:?}", acc.id);
-				return Ok(());
-			}
+                return Ok(());
+            }
 
-			// The case of `None`: no account is available for sending
-			log::error!("No local account available");
-			Err(<Error<T>>::NoLocalAcctForSigning)
-		}
+            // The case of `None`: no account is available for sending
+            log::error!("No local account available");
+            Err(<Error<T>>::NoLocalAcctForSigning)
+        }
 
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
@@ -533,31 +539,29 @@ pub mod pallet {
 
         fn remove_first_from_db() {
             let remover = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-            let remove_status = remover.mutate::<VecDeque<SnapshotInfo>, (), _>(move |storage| {
-                let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                    prev_storage
-                } else {
-                    // At this point there will always be at least one data inside storage
-                    // upon which this method was called.
-                    // if control reach this point, it means that this storage have been mutated
-                    // from somewhere else which is unwanted race condition. So we just panic here
-                    unreachable!();
-                };
+            let remove_status =
+                remover.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
+                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
+                        prev_storage
+                    } else {
+                        // At this point there will always be at least one data inside storage
+                        // upon which this method was called.
+                        // if control reach this point, it means that this storage have been mutated
+                        // from somewhere else which is unwanted race condition. So we just panic here
+                        unreachable!();
+                    };
 
-                // Always remove from front as get_next_from_db always return from front
-                // remember this is vecdeque so complxity of pop_front() = pop_back() = O(0)
-                previous_storage.pop_front();
+                    // Always remove from front as get_next_from_db always return from front
+                    // remember this is vecdeque so complxity of pop_front() = pop_back() = O(0)
+                    previous_storage.pop_front();
 
-                Ok(previous_storage)
-            });
+                    Ok(previous_storage)
+                });
 
             if let Err(err) = remove_status {
                 // TODO:
                 // Some proper handeling like retry
-                panic!(
-                    "Couldn't remove first element forn claim offchain storage. Error: {:?}",
-                    err
-                );
+                panic!("Couldn't remove first element forn claim offchain storage. Error: ",);
             }
         }
 
