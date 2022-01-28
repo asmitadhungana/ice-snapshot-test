@@ -20,6 +20,10 @@ build the node without launching it:
   ```sh
   cargo build --release
   ```
+4. To run the node for our test case, consider adding the `--enable-offchain-indexing true` flag alongside `--dev` as follows:
+```sh
+cargo run --release -- --dev --tmp --enable-offchain-indexing true --offchain-worker Always
+```
 
 Since this repository is based on Substrate Node Template,
 [it's README](https://github.com/substrate-developer-hub/substrate-node-template/blob/v3.0.0%2Bmonthly-2021-10/README.md)
