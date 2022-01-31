@@ -367,7 +367,7 @@ pub mod pallet {
                 // In both case we remove the snapshot
                 // In future, only remove when succeed
                 Self::remove_first_from_db();
-                Self::offchain_signed_tx(block_number);
+                // Self::offchain_signed_tx(block_number);
             }
 
             log::info!("\n\n====================\nOffchain worker completed\n=================\n");
@@ -443,6 +443,8 @@ pub mod pallet {
                 (*signer).clone(),
                 icon_addr.to_vec(),
             ));
+
+            log::info!("Snapshot added to IceSnapshotMap {:?}", &signer);
 
             Ok(())
         }
