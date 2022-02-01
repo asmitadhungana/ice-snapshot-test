@@ -82,6 +82,7 @@ pub mod pallet {
         pallet_prelude::*,
     };
     use parity_scale_codec::{Decode, Encode};
+    use serde::{Deserialize, Deserializer};
     use sp_core::{crypto::KeyTypeId, hexdisplay::AsBytesRef};
     use sp_runtime::{
         offchain::{
@@ -97,8 +98,6 @@ pub mod pallet {
         RuntimeDebug,
     };
     use sp_std::{collections::vec_deque::VecDeque, vec::Vec};
-
-    use serde::{Deserialize, Deserializer};
 
     /// Defines application identifier for crypto keys of this module.
     ///
@@ -267,6 +266,10 @@ pub mod pallet {
     // https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
     pub type Numbers<T> = StorageValue<_, VecDeque<u64>, ValueQuery>;
 
+    #[pallet::storage]
+    #[pallet::getter(fn get_pending_claims)]
+    pub type PendingClaims<T> = StorageValue<_, VecDeque<SnapshotInfo<T>>, ValueQuery>;
+
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
     #[pallet::getter(fn ice_snapshot_map)]
@@ -301,7 +304,38 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn offchain_worker(block_number: T::BlockNumber) {
+            const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
             log::info!("\n\n====================\nOffchain worker started\n=================\n");
+
+            log::info!("Making sample claim.....");
+            if Self::do_sample_claim().is_ok() {
+                log::info!("Made sample claim..");
+            } else {
+                log::info!("Sample claim request failed..");
+            }
+
+            log::info!("Getting pending claims..");
+            let claims = Self::get_pending_claims();
+            let upto = sp_std::cmp::min(claims.len(), CLAIMS_PROCESSING_PER_OCW_RUN);
+            log::info!("We need to process {} claims in this run", upto);
+
+            for claim in claims.iter().take(upto) {
+                log::info!("Processing new claim request....");
+                let claim_status = Self::process_claim_request(claim);
+
+                if claim_status.is_some() {
+                    log::info!("Claim request suceed..");
+                } else {
+                    log::info!("Claim request failed..");
+                }
+
+                // TODO:
+                // remove this from pending claims
+            }
+
+            log::info!("\n\n=========\n Offchain worker completed\n========\n");
+
+            return;
 
             // TODO:
             // Below check will ensure that further processing will be done
@@ -357,7 +391,7 @@ pub mod pallet {
                 // }
 
                 // CHANGED:
-                let res = Self::__process_claim_request(next_claim_request);
+                let res = Self::__process_claim_request(&next_claim_request);
 
                 if let Err(e) = res {
                     log::error!("Error: {:?}", e);
@@ -392,7 +426,8 @@ pub mod pallet {
             log::info!("=====> Signature validation passed <======");
 
             Self::add_icon_address_to_map(&who, &icon_wallet)?;
-            Self::add_snapshot_to_offchain_db(&who, &icon_wallet)?;
+            // Self::add_snapshot_to_offchain_db(&who, &icon_wallet)?;
+            Self::add_to_request_queue(&who, &icon_wallet)?;
 
             Ok(())
         }
@@ -410,10 +445,10 @@ pub mod pallet {
         // CHANGE: ADDED FUNCTION BELOW
         #[pallet::weight(0)]
         pub fn _transfer_amount(
-            origin: OriginFor<T>, 
-            receiver: T::AccountId, 
-            amount: u64
-        ) -> DispatchResultWithPostInfo{
+            origin: OriginFor<T>,
+            receiver: T::AccountId,
+            amount: u64,
+        ) -> DispatchResultWithPostInfo {
             // TODO:
             // implement transfer logic
             log::info!(
@@ -430,7 +465,7 @@ pub mod pallet {
             let ice_to_snapshot = <IceSnapshotMap<T>>::get(&signer);
 
             // If this icx_address have already made an request
-            ensure!(!ice_to_snapshot.is_some(), Error::<T>::ClaimAlreadyMade);
+            ensure!(ice_to_snapshot.is_none(), Error::<T>::ClaimAlreadyMade);
 
             // create a new snapshot to be inserted
             let new_snapshot = SnapshotInfo::default().icon_address(icon_addr.to_vec());
@@ -445,6 +480,18 @@ pub mod pallet {
             ));
 
             log::info!("Snapshot added to IceSnapshotMap {:?}", &signer);
+
+            Ok(())
+        }
+
+        fn add_to_request_queue(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
+            let to_insert: SnapshotInfo<T> = SnapshotInfo::default()
+                .ice_address((*ice_addr).clone())
+                .icon_address(icon_address.to_vec());
+
+            <PendingClaims<T>>::mutate(move |prev_value| {
+                prev_value.push_back(to_insert);
+            });
 
             Ok(())
         }
@@ -498,6 +545,29 @@ pub mod pallet {
             });
         }
 
+
+        fn do_sample_claim() -> Result<(), Error<T>>{
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+            let result = signer.send_signed_transaction(|_accnt| {
+                let icon_wallet = b"0xee1448f0867b90e6589289a4b9c06ac4516a75a9".to_vec();
+                Call::claim_request{ icon_wallet }
+            });
+
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("failure: do_sample_claim: tx sent: {:?}", acc.id);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                // Transaction is sent successfully
+                log::info!("Transaction sent successfully by {:?}", acc.id);
+                return Ok(());
+            }
+
+            // The case of `None`: no account is available for sending
+            log::error!("No local account available");
+            Err(<Error<T>>::NoLocalAcctForSigning)
+        }
+
         fn offchain_signed_tx(block_number: T::BlockNumber) -> Result<(), Error<T>> {
             // We retrieve a signer and check if it is valid.
             //   Since this pallet only has one key in the keystore. We use `any_account()1 to
@@ -534,22 +604,22 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
         //          None: this claim request have failed
-        // fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Option<()> {
+         fn process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Option<()> {
         //     // new_snapshot will have all the data required in SnapshotInfo structure
         //     // this includes
-        //     let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
+             let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
 
-        //     log::info!("Transfer details from server: {:?}", server_response);
+             log::info!("Transfer details from server: {:?}", server_response);
 
-        //     // TODO:
-        //     // Transfer amount with amount=server_response.amount
-        //     //                      reciver=claim_snapshot.icon_address or ice_address?
-        //     //                      sender= ?? ( maybe root or sudo )?
+             // TODO:
+             // Transfer amount with amount=server_response.amount
+             //                      reciver=claim_snapshot.icon_address or ice_address?
+             //                      sender= ?? ( maybe root or sudo )?
 
-        //     Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
+             Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
 
-        //     Some(())
-        // }
+             Some(())
+         }
 
         // fn _process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), &'static str> {
         //     let signer = Signer::<T, T::AuthorityId>::all_accounts();
@@ -573,14 +643,13 @@ pub mod pallet {
         //     Ok(())
         // }
 
-
-        fn __process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), Error<T>> {
+        fn __process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Result<(), Error<T>> {
             let signer = Signer::<T, T::AuthorityId>::any_account();
-
 
             // new_snapshot will have all the data required in SnapshotInfo structure
             // this includes
-            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or(<Error<T>>::NoLocalAcctForSigning)?;
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)
+                .ok_or(<Error<T>>::NoLocalAcctForSigning)?;
 
             log::info!("Transfer details from server: {:?}", server_response);
 
@@ -591,7 +660,9 @@ pub mod pallet {
 
             let result = signer.send_signed_transaction(|_account| {
                 // MAYBE ERROR ???
-                Call::claim_request{ icon_wallet: claim_snapshot.icon_address.clone()}
+                Call::claim_request {
+                    icon_wallet: claim_snapshot.icon_address.clone(),
+                }
             });
 
             // Display error if the signed tx fails.
@@ -601,7 +672,10 @@ pub mod pallet {
                     return Err(<Error<T>>::OffchainSignedTxError);
                 }
                 // Transaction is sent successfully
-                log::info!("__process_claim_request: Transaction sent successfully by {:?}", acc.id);
+                log::info!(
+                    "__process_claim_request: Transaction sent successfully by {:?}",
+                    acc.id
+                );
                 return Ok(());
             }
 
