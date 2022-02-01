@@ -72,8 +72,8 @@ pub mod pallet {
     pub use crate::SNAPSHOT_STORAGE_KEY;
 
     use core::convert::TryInto;
-    use frame_support::error::LookupError;
     use frame_support::pallet_prelude::*;
+    use frame_support::{dispatch::DispatchResult, error::LookupError};
     use frame_system::{
         offchain::{
             AppCrypto, CreateSignedTransaction, SendSignedTransaction, SendUnsignedTransaction,
@@ -84,6 +84,7 @@ pub mod pallet {
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Deserializer};
     use sp_core::{crypto::KeyTypeId, hexdisplay::AsBytesRef};
+    use sp_runtime::offchain::http::PendingRequest;
     use sp_runtime::{
         offchain::{
             http,
@@ -98,6 +99,8 @@ pub mod pallet {
         RuntimeDebug,
     };
     use sp_std::{collections::vec_deque::VecDeque, vec::Vec};
+
+    const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
 
     /// Defines application identifier for crypto keys of this module.
     ///
@@ -304,7 +307,6 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn offchain_worker(block_number: T::BlockNumber) {
-            const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
             log::info!("\n\n====================\nOffchain worker started\n=================\n");
 
             log::info!("Making sample claim.....");
@@ -432,6 +434,21 @@ pub mod pallet {
             Ok(())
         }
 
+        #[pallet::weight(0)]
+        pub fn remove_request(origin: OriginFor<T>, ice_addr: T::AccountId) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // TODO: Check if this origin has authority
+            // if authority_list.contains(who) == false {
+            //      return Error::AccessDenied
+            // }
+
+           // TODO:
+           // remove fromonchain db
+
+            Ok(())
+        }
+
         #[pallet::weight(10000)]
         pub fn submit_number_signed(origin: OriginFor<T>, number: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
@@ -545,12 +562,34 @@ pub mod pallet {
             });
         }
 
+        fn remove_from_onchain_storage(snapshot: &SnapshotInfo<T>) -> Result<(), Error<T>> {
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+            let result = signer.send_signed_transaction(|_accnt| {
+                Call::remove_request{ ice_addr: snapshot.ice_address.clone() }
+            });
+            
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("failure: do_sample_claim: tx sent: {:?}", acc.id);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                // Transaction is sent successfully
+                log::info!("Transaction sent successfully by {:?}", acc.id);
+                return Ok(());
+            }
 
-        fn do_sample_claim() -> Result<(), Error<T>>{
+            // The case of `None`: no account is available for sending
+            log::error!("No local account available");
+            Err(<Error<T>>::NoLocalAcctForSigning)
+        }
+
+        fn do_sample_claim() -> Result<(), Error<T>> {
+            return Ok(());
+
             let signer = Signer::<T, T::AuthorityId>::any_account();
             let result = signer.send_signed_transaction(|_accnt| {
                 let icon_wallet = b"0xee1448f0867b90e6589289a4b9c06ac4516a75a9".to_vec();
-                Call::claim_request{ icon_wallet }
+                Call::claim_request { icon_wallet }
             });
 
             if let Some((acc, res)) = result {
@@ -604,22 +643,22 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
         //          None: this claim request have failed
-         fn process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Option<()> {
-        //     // new_snapshot will have all the data required in SnapshotInfo structure
-        //     // this includes
-             let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
+        fn process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Option<()> {
+            //     // new_snapshot will have all the data required in SnapshotInfo structure
+            //     // this includes
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
 
-             log::info!("Transfer details from server: {:?}", server_response);
+            log::info!("Transfer details from server: {:?}", server_response);
 
-             // TODO:
-             // Transfer amount with amount=server_response.amount
-             //                      reciver=claim_snapshot.icon_address or ice_address?
-             //                      sender= ?? ( maybe root or sudo )?
+            // TODO:
+            // Transfer amount with amount=server_response.amount
+            //                      reciver=claim_snapshot.icon_address or ice_address?
+            //                      sender= ?? ( maybe root or sudo )?
 
-             Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
+            Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
 
-             Some(())
-         }
+            Some(())
+        }
 
         // fn _process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), &'static str> {
         //     let signer = Signer::<T, T::AuthorityId>::all_accounts();
