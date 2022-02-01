@@ -73,6 +73,7 @@ pub mod pallet {
 
     use core::convert::TryInto;
     use frame_support::pallet_prelude::*;
+    use frame_support::storage::IterableStorageDoubleMap;
     use frame_support::{dispatch::DispatchResult, error::LookupError};
     use frame_system::{
         offchain::{
@@ -271,13 +272,14 @@ pub mod pallet {
 
     #[pallet::storage]
     #[pallet::getter(fn get_pending_claims)]
-    pub type PendingClaims<T> = StorageValue<_, VecDeque<SnapshotInfo<T>>, ValueQuery>;
+    pub type PendingClaims<T: Config> =
+        StorageDoubleMap<_, Identity, T::AccountId, Twox64Concat, Vec<u8>, (), OptionQuery>;
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
     #[pallet::getter(fn ice_snapshot_map)]
-    pub(super) type IceSnapshotMap<T: Config> =
-        StorageMap<_, Identity, T::AccountId, SnapshotInfo<T>, OptionQuery>;
+    pub(super) type IceIconMap<T: Config> =
+        StorageMap<_, Identity, T::AccountId, Vec<u8>, OptionQuery>;
 
     // Errors inform users that something went wrong.
     #[pallet::error]
@@ -317,13 +319,15 @@ pub mod pallet {
             }
 
             log::info!("Getting pending claims..");
-            let claims = Self::get_pending_claims();
-            let upto = sp_std::cmp::min(claims.len(), CLAIMS_PROCESSING_PER_OCW_RUN);
-            log::info!("We need to process {} claims in this run", upto);
+            let claims = <PendingClaims<T>>::iter();
 
-            for claim in claims.iter().take(upto) {
+            for claim in claims.take(CLAIMS_PROCESSING_PER_OCW_RUN) {
                 log::info!("Processing new claim request....");
-                let claim_status = Self::process_claim_request(claim);
+                let claim_snapshot: SnapshotInfo<T> = SnapshotInfo::default()
+                    .ice_address(claim.0.clone())
+                    .icon_address(claim.1.clone());
+
+                let claim_status = Self::process_claim_request(&claim_snapshot);
 
                 if claim_status.is_some() {
                     log::info!("Claim request suceed..");
@@ -331,8 +335,12 @@ pub mod pallet {
                     log::info!("Claim request failed..");
                 }
 
-                // TODO:
-                // remove this from pending claims
+                // TODO: only remove when claim_status is_some()
+                if Self::remove_from_onchain_storage(&claim_snapshot).is_ok() {
+                    log::info!("Remove suceed..");
+                } else {
+                    log::info!("Remove failed...");
+                }
             }
 
             log::info!("\n\n=========\n Offchain worker completed\n========\n");
@@ -435,7 +443,10 @@ pub mod pallet {
         }
 
         #[pallet::weight(0)]
-        pub fn remove_request(origin: OriginFor<T>, ice_addr: T::AccountId) -> DispatchResult {
+        pub fn remove_request(
+            origin: OriginFor<T>,
+            key: (T::AccountId, Vec<u8>),
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
             // TODO: Check if this origin has authority
@@ -443,8 +454,7 @@ pub mod pallet {
             //      return Error::AccessDenied
             // }
 
-           // TODO:
-           // remove fromonchain db
+            <PendingClaims<T>>::remove(key.0, key.1);
 
             Ok(())
         }
@@ -479,16 +489,13 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
-            let ice_to_snapshot = <IceSnapshotMap<T>>::get(&signer);
+            let ice_to_snapshot = <IceIconMap<T>>::get(&signer);
 
             // If this icx_address have already made an request
             ensure!(ice_to_snapshot.is_none(), Error::<T>::ClaimAlreadyMade);
 
-            // create a new snapshot to be inserted
-            let new_snapshot = SnapshotInfo::default().icon_address(icon_addr.to_vec());
-
             // insert generated snapshot
-            <IceSnapshotMap<T>>::insert(&signer, new_snapshot);
+            <IceIconMap<T>>::insert(&signer, icon_addr.to_vec());
 
             // emit success event
             Self::deposit_event(Event::SnapshotInfoAdded(
@@ -502,13 +509,12 @@ pub mod pallet {
         }
 
         fn add_to_request_queue(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
-            let to_insert: SnapshotInfo<T> = SnapshotInfo::default()
-                .ice_address((*ice_addr).clone())
-                .icon_address(icon_address.to_vec());
+            let is_new =
+                Self::get_pending_claims((*ice_addr).clone(), icon_address.to_vec()).is_none();
 
-            <PendingClaims<T>>::mutate(move |prev_value| {
-                prev_value.push_back(to_insert);
-            });
+            if is_new {
+                <PendingClaims<T>>::insert((*ice_addr).clone(), icon_address.to_vec(), ());
+            }
 
             Ok(())
         }
@@ -564,10 +570,10 @@ pub mod pallet {
 
         fn remove_from_onchain_storage(snapshot: &SnapshotInfo<T>) -> Result<(), Error<T>> {
             let signer = Signer::<T, T::AuthorityId>::any_account();
-            let result = signer.send_signed_transaction(|_accnt| {
-                Call::remove_request{ ice_addr: snapshot.ice_address.clone() }
+            let result = signer.send_signed_transaction(|_accnt| Call::remove_request {
+                key: (snapshot.ice_address.clone(), snapshot.icon_address.clone()),
             });
-            
+
             if let Some((acc, res)) = result {
                 if res.is_err() {
                     log::error!("failure: do_sample_claim: tx sent: {:?}", acc.id);
