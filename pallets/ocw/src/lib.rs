@@ -562,7 +562,7 @@ fn generate_response(counter: usize) -> sp_std::vec::Vec<u8> {
         .as_bytes()
         .iter()
         .chain(counter_bytes.as_bytes())
-        .chain(b",")
+        .chain(b"\",")
         .chain(r##""amount": 10982,"defi_user": true,"vesting_percentage": 14}"##.as_bytes())
         .cloned()
         .collect::<sp_std::vec::Vec<u8>>()
