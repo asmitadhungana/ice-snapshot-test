@@ -277,9 +277,9 @@ pub mod pallet {
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
-    #[pallet::getter(fn ice_snapshot_map)]
-    pub(super) type IceIconMap<T: Config> =
-        StorageMap<_, Identity, T::AccountId, Vec<u8>, OptionQuery>;
+    #[pallet::getter(fn get_ice_snapshot_map)]
+    pub(super) type IceSnapshotMap<T: Config> =
+        StorageMap<_, Identity, T::AccountId, SnapshotInfo<T>, OptionQuery>;
 
     // Errors inform users that something went wrong.
     #[pallet::error]
@@ -489,13 +489,18 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
-            let ice_to_snapshot = <IceIconMap<T>>::get(&signer);
+            let already_exists = <IceSnapshotMap<T>>::contains_key(&signer);
 
             // If this icx_address have already made an request
-            ensure!(ice_to_snapshot.is_none(), Error::<T>::ClaimAlreadyMade);
+            ensure!(!already_exists, Error::<T>::ClaimAlreadyMade);
+
+            // create default snapshot with only ice & icon address populated
+            let to_insert: SnapshotInfo<T> = SnapshotInfo::default()
+                .ice_address((*signer).clone())
+                .icon_address(icon_addr.to_vec());
 
             // insert generated snapshot
-            <IceIconMap<T>>::insert(&signer, icon_addr.to_vec());
+            <IceSnapshotMap<T>>::insert(&signer, to_insert);
 
             // emit success event
             Self::deposit_event(Event::SnapshotInfoAdded(
@@ -661,6 +666,7 @@ pub mod pallet {
             //                      reciver=claim_snapshot.icon_address or ice_address?
             //                      sender= ?? ( maybe root or sudo )?
 
+            // TODO: Check for already transfer
             Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
 
             Some(())
