@@ -180,8 +180,11 @@ pub mod pallet {
 
     #[derive(Encode, Decode)]
     pub enum ClaimProcessing {
+        // this variant indicate that some ocw is currently processing this entry
         OnGoing,
+        // no offchain worker has ever touched this
         Fresh,
+        // an offchain worker tried to process this entry but failed
         Failed,
     }
 
@@ -491,6 +494,10 @@ pub mod pallet {
                 log::info!("Transfer function suceed and request have been removed frm queue");
             } else {
                 log::info!("Transfer function failed. We will keep the data..");
+                // state that this claim request failed
+                <PendingClaims<T>>::mutate(ice_address, icon_address, |_prev| {
+                    ClaimProcessing::Failed
+                });
             }
 
             transfer_status
