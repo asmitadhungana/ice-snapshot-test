@@ -178,6 +178,13 @@ pub mod pallet {
         }
     }
 
+    #[derive(Encode, Decode)]
+    pub enum ClaimProcessing {
+        OnGoing,
+        Fresh,
+        Failed,
+    }
+
     // Server response structure
     #[derive(
         Deserialize,
@@ -282,8 +289,15 @@ pub mod pallet {
 
     #[pallet::storage]
     #[pallet::getter(fn get_pending_claims)]
-    pub type PendingClaims<T: Config> =
-        StorageDoubleMap<_, Identity, T::AccountId, Twox64Concat, Vec<u8>, (), OptionQuery>;
+    pub type PendingClaims<T: Config> = StorageDoubleMap<
+        _,
+        Identity,
+        T::AccountId,
+        Twox64Concat,
+        Vec<u8>,
+        ClaimProcessing,
+        OptionQuery,
+    >;
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
@@ -334,6 +348,12 @@ pub mod pallet {
             log::info!("Getting pending claims..");
             let claims = <PendingClaims<T>>::iter();
 
+            // TODO: [optimization#taking-claim]
+            // we take all the claims. Instead check if that request is ongoing
+            // and ony take if not. This will make sure that this worker
+            // will really process 100 claims
+            // this is done by usiong take_while method
+            // ignored for now for rapid dev
             for claim in claims.take(CLAIMS_PROCESSING_PER_OCW_RUN) {
                 log::info!("Processing new claim request....");
                 let claim_snapshot: SnapshotInfo<T> = SnapshotInfo::default()
@@ -342,10 +362,10 @@ pub mod pallet {
 
                 let claim_status = Self::process_claim_request(claim_snapshot);
 
-                if claim_status.is_some() {
-                    log::info!("Claim request suceed..");
-                } else {
-                    log::info!("Claim request failed..");
+                match claim_status {
+                    Some(true) => log::info!("Claim processing done sucessfully..."),
+                    Some(false) => log::info!("Claim processing ignored.."),
+                    None => log::info!("Claim processing failed..."),
                 }
             }
 
@@ -463,18 +483,17 @@ pub mod pallet {
 
             // TODO:
             // Waiting for implementation of transfer function
-            let transfer_succeed = true;
+            let transfer_status: DispatchResult = Ok(());
 
             // At this point, transfer has been sucessfully made
-            if transfer_succeed {
-                log::info!("Transfer function suceed. We will remove the data...");
-                // TODO: remove and update flag
+            if transfer_status.is_ok() {
+                <PendingClaims<T>>::remove(ice_address, icon_address);
+                log::info!("Transfer function suceed and request have been removed frm queue");
             } else {
                 log::info!("Transfer function failed. We will keep the data..");
-                return Err(Error::<T>::TransferFailed.into());
             }
 
-            Ok(())
+            transfer_status
         }
 
         #[pallet::weight(0)]
@@ -553,7 +572,12 @@ pub mod pallet {
                 Self::get_pending_claims((*ice_addr).clone(), icon_address.to_vec()).is_none();
 
             if is_new {
-                <PendingClaims<T>>::insert((*ice_addr).clone(), icon_address.to_vec(), ());
+                // insert this request as fresh entry
+                <PendingClaims<T>>::insert(
+                    (*ice_addr).clone(),
+                    icon_address.to_vec(),
+                    ClaimProcessing::Fresh,
+                );
             }
 
             Ok(())
@@ -689,7 +713,26 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
         //          None: this claim request have failed
-        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Option<()> {
+        // TODO:
+        // after doing optimization#taking-claim change it return type to Option<()>
+        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Option<bool> {
+            // If this is already ongoing then just return
+            // TODO:
+            // do this check before calling this function
+            if let Some(ClaimProcessing::OnGoing) =
+                Self::get_pending_claims(claim_snapshot.ice_address, claim_snapshot.icon_address)
+            {
+                return Some(false);
+            }
+
+            // update that we are taking the responsibility
+            // and this entry is ongoing on process
+            <PendingClaims<T>>::mutate(
+                claim_snapshot.ice_address,
+                claim_snapshot.icon_address,
+                |_prev_status| ClaimProcessing::OnGoing,
+            );
+
             //     // new_snapshot will have all the data required in SnapshotInfo structure
             //     // this includes
             let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
@@ -719,7 +762,7 @@ pub mod pallet {
                 log::info!("Transfer call failed...");
             }
 
-            Some(())
+            Some(true)
         }
 
         fn send_complete_transfer_call(
