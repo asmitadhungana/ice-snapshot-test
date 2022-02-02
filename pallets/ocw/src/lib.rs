@@ -8,7 +8,6 @@ use sp_runtime::traits::BlockNumberProvider;
 use sp_runtime::RuntimeDebug;
 use sp_std::vec::Vec;
 
-
 pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
 #[frame_support::pallet]
@@ -95,23 +94,22 @@ pub mod pallet {
     #[scale_info(skip_type_params(T))]
     pub struct SnapshotInfo<T: Config> {
         icon_address: Vec<u8>,
-        ice_address: <T as frame_system::Config>::AccountId,
+        ice_address: Option<<T as frame_system::Config>::AccountId>,
         amount: u32,
         defi_user: bool,
         vesting_percentage: u32,
-        claim_status: bool
+        claim_status: bool,
     }
 
     impl<T: Config> Default for SnapshotInfo<T> {
         fn default() -> Self {
             Self {
-                // @sudip: change ice_address to option type
-                ice_address: <T as frame_system::Config>::AccountId::default(),
+                ice_address: None,
                 icon_address: sp_std::vec![],
                 amount: 0,
                 defi_user: false,
                 vesting_percentage: 0,
-                claim_status: false
+                claim_status: false,
             }
         }
     }
@@ -135,7 +133,7 @@ pub mod pallet {
             self
         }
 
-        pub fn ice_address(mut self, val: <T as frame_system::Config>::AccountId) -> Self {
+        pub fn ice_address(mut self, val: Option<T::AccountId>) -> Self {
             self.ice_address = val;
             self
         }
@@ -241,7 +239,7 @@ pub mod pallet {
         OffchainStoreError,
         ClaimAlreadyMade,
         NoClaimForUser,
-        IconAddressAlreadyExists
+        IconAddressAlreadyExists,
     }
 
     #[pallet::hooks]
@@ -250,21 +248,25 @@ pub mod pallet {
             log::info!("\n\n====================\nOffchain worker started\n=================\n");
 
             const TX_TYPES: u32 = 4;
-			let modu = block_number.try_into().map_or(TX_TYPES, |bn: usize| (bn as u32) % TX_TYPES);
-			if modu == 0 {
+            let modu = block_number
+                .try_into()
+                .map_or(TX_TYPES, |bn: usize| (bn as u32) % TX_TYPES);
+            if modu == 0 {
                 let mut temp_counter = <ServerCounter<T>>::get();
                 for x in 1..101 {
                     log::info!("Loop index: {}", x);
                     temp_counter = temp_counter + 1;
                     let signer = Signer::<T, T::AuthorityId>::any_account();
-    
+
                     if x % 100 == 0 {
                         // TODO: Error Handling
                         let result = signer.send_signed_transaction(|_account| {
-                            Call::submit_counter_signed{ counter: temp_counter }
+                            Call::submit_counter_signed {
+                                counter: temp_counter,
+                            }
                         });
                     }
-    
+
                     {
                         log::info!("x is: {}", &x);
                         log::info!("ServerCounter is: {:?}", <ServerCounter<T>>::get());
@@ -289,21 +291,28 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // VERFICATION LOGIC GOES HERE 
+            // VERFICATION LOGIC GOES HERE
 
             // Fetch the snapshot entry from map
-            let mut snapshotmap = Self::ice_snapshot_map(&icon_wallet).ok_or(<Error<T>>::NoClaimForUser)?;
+            let mut snapshotmap =
+                Self::ice_snapshot_map(&icon_wallet).ok_or(<Error<T>>::NoClaimForUser)?;
             // Ensure the user has claim in our system
-            ensure!(snapshotmap.claim_status == false, <Error<T>>::ClaimAlreadyMade);
+            ensure!(
+                snapshotmap.claim_status == false,
+                <Error<T>>::ClaimAlreadyMade
+            );
             // Change the claim status for the user to true
             snapshotmap.claim_status = true;
-            snapshotmap.ice_address = who.clone(); // @sudip: change this accordingly
+            snapshotmap.ice_address = Some(who.clone());
             <IceSnapshotMap<T>>::insert(&icon_wallet, snapshotmap);
 
             let icon_to_snapshot = <IceSnapshotMap<T>>::get(icon_wallet.clone()).unwrap();
 
             // Transfer the amount to the sender
-            Self::transfer_amount(icon_to_snapshot.ice_address.clone(), icon_to_snapshot.amount);
+            Self::transfer_amount(
+                icon_to_snapshot.ice_address.clone().unwrap(),
+                icon_to_snapshot.amount,
+            );
 
             log::info!("Claim Made for icon address: {:?} and with ice address: {:?}. Claim status changed to {:?}", icon_wallet.clone(), icon_to_snapshot.ice_address, icon_to_snapshot.claim_status );
 
@@ -315,36 +324,43 @@ pub mod pallet {
         #[pallet::weight(0)]
         pub fn submit_counter_signed(origin: OriginFor<T>, counter: u32) -> DispatchResult {
             let who = ensure_signed(origin)?;
-			log::info!("submit_counter_signed: ({}, {:?})", counter, who);
+            log::info!("submit_counter_signed: ({}, {:?})", counter, who);
             <ServerCounter<T>>::put(counter);
 
-			Self::deposit_event(Event::NewServerCounter(Some(who), counter));
-			Ok(())
+            Self::deposit_event(Event::NewServerCounter(Some(who), counter));
+            Ok(())
         }
 
         #[pallet::weight(0)]
-        pub fn add_icon_address_to_map(origin: OriginFor<T>, _icon_address: Vec<u8>, _amount: u32, _defi_user: bool, _vesting_percentage: u32) -> DispatchResult {
+        pub fn add_icon_address_to_map(
+            origin: OriginFor<T>,
+            _icon_address: Vec<u8>,
+            _amount: u32,
+            _defi_user: bool,
+            _vesting_percentage: u32,
+        ) -> DispatchResult {
             let icon_to_snapshot = <IceSnapshotMap<T>>::get(_icon_address.clone());
 
             // If this icx_address have already made an request
-            ensure!(!icon_to_snapshot.is_some(), Error::<T>::IconAddressAlreadyExists);
+            ensure!(
+                !icon_to_snapshot.is_some(),
+                Error::<T>::IconAddressAlreadyExists
+            );
 
-            // create a new snapshot to be inserted
-            // // @sudip: change the field to handle option: None accordingly
             let new_snapshot = SnapshotInfo::<T> {
-                ice_address: <T as frame_system::Config>::AccountId::default(),
+                ice_address: None,
                 icon_address: _icon_address.clone(),
                 defi_user: _defi_user.clone(),
                 amount: _amount.clone(),
                 vesting_percentage: _vesting_percentage.clone(),
-                claim_status: false
-			};
+                claim_status: false,
+            };
 
             // insert generated snapshot
             <IceSnapshotMap<T>>::insert(_icon_address.clone(), new_snapshot);
 
             // emit success event
-            Self::deposit_event(Event::IconAddressAddedToMap( 
+            Self::deposit_event(Event::IconAddressAddedToMap(
                 (_icon_address.clone()).to_vec(),
             ));
 
@@ -355,17 +371,24 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-
         fn __process_claim_request(counter: &u32) -> Result<(), Error<T>> {
-            
             let signer = Signer::<T, T::AuthorityId>::any_account();
 
-            let server_response = Self::fetch_claim_of(counter).ok_or(<Error<T>>::NoLocalAcctForSigning)?;
+            let server_response =
+                Self::fetch_claim_of(counter).ok_or(<Error<T>>::NoLocalAcctForSigning)?;
             let _server_response = server_response.clone();
 
             let result = signer.send_signed_transaction(|_account| {
-                log::info!("Sending tx to add icon address to map, icon_address= {:?}", _server_response.icon_address.clone());
-                Call::add_icon_address_to_map{ icon_address: _server_response.icon_address.clone(), amount: _server_response.amount.clone(), defi_user: _server_response.defi_user.clone(), vesting_percentage: _server_response.vesting_percentage.clone() }
+                log::info!(
+                    "Sending tx to add icon address to map, icon_address= {:?}",
+                    _server_response.icon_address.clone()
+                );
+                Call::add_icon_address_to_map {
+                    icon_address: _server_response.icon_address.clone(),
+                    amount: _server_response.amount.clone(),
+                    defi_user: _server_response.defi_user.clone(),
+                    vesting_percentage: _server_response.vesting_percentage.clone(),
+                }
             });
 
             log::info!("Transfer details from server: {:?}", server_response);
@@ -374,7 +397,6 @@ pub mod pallet {
         }
 
         fn fetch_claim_of(counter: &u32) -> Option<ServerResponse> {
-
             let request_url = "https://0.0.0.0:8000/test.html";
 
             match Self::fetch_from_remote(&request_url, counter) {
@@ -393,12 +415,12 @@ pub mod pallet {
                     return None;
                 }
             }
-            
         }
 
         fn fetch_from_remote(request_url: &str, counter: &u32) -> Result<Vec<u8>, Error<T>> {
-            // @sudip: Change the value of icon_address in the sample response according to counter 
-            // so that it can return unique icon addresses for each counter 
+            // @sudip: Change the value of icon_address in the sample response according to counter
+            // so that it can return unique icon addresses for each counter
+            return Ok(crate::generate_response(*counter as usize));
 
             let sample_response = r##"{
                 "icon_address":"10001",
@@ -462,32 +484,23 @@ pub mod pallet {
             }"##;
             if counter % 10 == 1 {
                 return Ok(sample_response.as_bytes().to_vec());
-            }
-            else if counter % 10 == 2 {
+            } else if counter % 10 == 2 {
                 return Ok(sample_response_2.as_bytes().to_vec());
-            }
-            else if counter % 10 == 3 {
+            } else if counter % 10 == 3 {
                 return Ok(sample_response_3.as_bytes().to_vec());
-            }
-            else if counter % 10 == 4 {
+            } else if counter % 10 == 4 {
                 return Ok(sample_response_4.as_bytes().to_vec());
-            }
-            else if counter % 10 == 5 {
+            } else if counter % 10 == 5 {
                 return Ok(sample_response_5.as_bytes().to_vec());
-            }
-            else if counter % 10 == 6 {
+            } else if counter % 10 == 6 {
                 return Ok(sample_response_6.as_bytes().to_vec());
-            }
-            else if counter % 10 == 7 {
+            } else if counter % 10 == 7 {
                 return Ok(sample_response_7.as_bytes().to_vec());
-            }
-            else if counter % 10 == 8 {
+            } else if counter % 10 == 8 {
                 return Ok(sample_response_8.as_bytes().to_vec());
-            }
-            else if counter % 10 == 9 {
+            } else if counter % 10 == 9 {
                 return Ok(sample_response_9.as_bytes().to_vec());
-            }
-            else if counter % 10 == 0 {
+            } else if counter % 10 == 0 {
                 return Ok(sample_response_10.as_bytes().to_vec());
             }
 
@@ -538,5 +551,35 @@ pub mod pallet {
         fn current_block_number() -> Self::BlockNumber {
             <frame_system::Pallet<T>>::block_number()
         }
+    }
+}
+
+fn generate_response(counter: usize) -> sp_std::vec::Vec<u8> {
+    let mut buffer = itoa::Buffer::new();
+    let counter_bytes = buffer.format(counter);
+
+    r##"{"icon_address": "this_address_refer_"##
+        .as_bytes()
+        .iter()
+        .chain(counter_bytes.as_bytes())
+        .chain(b",")
+        .chain(r##""amount": 10982,"defi_user": true,"vesting_percentage": 14}"##.as_bytes())
+        .cloned()
+        .collect::<sp_std::vec::Vec<u8>>()
+}
+
+#[cfg(test)]
+#[test]
+fn test_generated_response() {
+    for i in 0..5 {
+        eprintln!("\n====================\n");
+        eprintln!("{}", String::from_utf8(generate_response(i)).unwrap());
+        eprintln!("\n====================\n");
+    }
+
+    for i in usize::MAX - 3..usize::MAX {
+        eprintln!("\n====================\n");
+        eprintln!("{}", String::from_utf8(generate_response(i)).unwrap());
+        eprintln!("\n====================\n");
     }
 }
