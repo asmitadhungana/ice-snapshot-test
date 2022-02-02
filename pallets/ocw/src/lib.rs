@@ -391,10 +391,12 @@ pub mod pallet {
 
             // Self::validate_signature(&signer, &icon_signature, &icon_wallet, &tx_obj)?;
 
-            log::info!("=====> Signature validation passed <======");
+            // log::info!("=====> Signature validation passed <======");
 
             Self::add_icon_address_to_map(&who, &icon_wallet)?;
             Self::add_to_request_queue(&who, &icon_wallet)?;
+
+            log::info!("\n\n=======> claim_request passed <======\n\n");
 
             Ok(())
         }
@@ -520,6 +522,7 @@ pub mod pallet {
             {
                 return Some(false);
             }
+            log::info!("\n~~~~~~~~~~~ A new claim request processing ~~~~~~~~~\n");
 
             // update that we are taking the responsibility
             // and this entry is ongoing on process
