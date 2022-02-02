@@ -373,77 +373,6 @@ pub mod pallet {
             }
 
             log::info!("\n\n=========\n Offchain worker completed\n========\n");
-
-            return;
-
-            // TODO:
-            // Below check will ensure that further processing will be done
-            // only once in every 2 trigger of offchain worker
-            /*
-            if block_number % 2 != 0 {
-                return;
-            }
-            */
-
-            // TODO: Following block is temporary just to put some data in offchain storage
-            {
-                let to_insert: SnapshotInfo<T> = SnapshotInfo::default();
-                let db_writer = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-                let _ = db_writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
-                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                        prev_storage
-                    } else {
-                        VecDeque::new()
-                    };
-
-                    previous_storage.push_back(to_insert.clone());
-
-                    Ok(previous_storage)
-                });
-            }
-
-            // Maximum number of request to run in this ocw
-            const MAX_PROCESSING_PER_OCW: u8 = 100;
-
-            // TODO:
-            // If we are really about to split work between offchain worker,
-            // mutex locking should be tested to avoid race, dead lock and unintended modification
-
-            // Process first 100 snapshot info in storage
-            'storage_loop: for _ in 0..MAX_PROCESSING_PER_OCW {
-                let next_claim_request = match Self::get_next_from_db() {
-                    Some(res) => res,
-                    None => {
-                        // Nothing is left in storage now
-                        break 'storage_loop;
-                    }
-                };
-                log::info!("Processing a new claim request from offchain worker....");
-
-                // Actual processing of claim: Signed Transaction by Offchain worker
-                // let claim_request = Self::process_claim_request(next_claim_request);
-
-                // if claim_request.is_some() {
-                //     log::info!("Request processing passed...");
-                // } else {
-                //     log::info!("Request processing failed...");
-                // }
-
-                // CHANGED:
-                let res = Self::__process_claim_request(&next_claim_request);
-
-                if let Err(e) = res {
-                    log::error!("Error: {:?}", e);
-                }
-
-                // TODO:
-                // In both case we remove the snapshot
-                // In future, only remove when succeed
-                Self::remove_first_from_db();
-                // Self::offchain_signed_tx(block_number);
-            }
-
-            log::info!("\n\n====================\nOffchain worker completed\n=================\n");
         }
     }
 
@@ -465,7 +394,6 @@ pub mod pallet {
             log::info!("=====> Signature validation passed <======");
 
             Self::add_icon_address_to_map(&who, &icon_wallet)?;
-            // Self::add_snapshot_to_offchain_db(&who, &icon_wallet)?;
             Self::add_to_request_queue(&who, &icon_wallet)?;
 
             Ok(())
@@ -502,58 +430,18 @@ pub mod pallet {
 
             transfer_status
         }
-
-        #[pallet::weight(0)]
-        pub fn remove_request(
-            origin: OriginFor<T>,
-            key: (T::AccountId, Vec<u8>),
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            // TODO: Check if this origin has authority
-            // if authority_list.contains(who) == false {
-            //      return Error::AccessDenied
-            // }
-
-            <PendingClaims<T>>::remove(key.0, key.1);
-
-            Ok(())
-        }
-
-        #[pallet::weight(10000)]
-        pub fn submit_number_signed(origin: OriginFor<T>, number: u64) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            log::info!("submit_number_signed: ({}, {:?})", number, who);
-            Self::append_or_replace_number(number);
-
-            Self::deposit_event(Event::NewNumber(Some(who), number));
-            Ok(())
-        }
-
-        // CHANGE: ADDED FUNCTION BELOW
-        #[pallet::weight(0)]
-        pub fn _transfer_amount(
-            origin: OriginFor<T>,
-            receiver: T::AccountId,
-            amount: u64,
-        ) -> DispatchResultWithPostInfo {
-            // TODO:
-            // implement transfer logic
-            log::info!(
-                "Crediting account {:?} with amount of {} ",
-                receiver,
-                amount
-            );
-            Ok(().into())
-        }
     }
 
     impl<T: Config> Pallet<T> {
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
             let already_exists = <IceSnapshotMap<T>>::contains_key(&signer);
 
-            // If this icx_address have already made an request
-            ensure!(!already_exists, Error::<T>::ClaimAlreadyMade);
+            if already_exists {
+                log::info!("This entry already exists in ice->snapshot map");
+                return Err(Error::<T>::ClaimAlreadyMade.into());
+            }
+
+            log::info!("Adding new entry to ice->snapshot map");
 
             // create default snapshot with only ice & icon address populated
             let to_insert: SnapshotInfo<T> = SnapshotInfo::default()
@@ -575,89 +463,23 @@ pub mod pallet {
         }
 
         fn add_to_request_queue(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
-            let is_new =
-                Self::get_pending_claims((*ice_addr).clone(), icon_address.to_vec()).is_none();
+            let already_exists = <PendingClaims<T>>::contains_key(ice_addr, icon_address);
 
-            if is_new {
-                // insert this request as fresh entry
-                <PendingClaims<T>>::insert(
-                    (*ice_addr).clone(),
-                    icon_address.to_vec(),
-                    ClaimProcessing::Fresh,
-                );
+            if already_exists {
+                log::info!("This entry already exists in queue..");
+                return Err(Error::<T>::ClaimAlreadyMade.into());
             }
 
-            Ok(())
-        }
+            log::info!("Adding new entry to queue");
 
-        fn add_snapshot_to_offchain_db(
-            ice_addr: &T::AccountId,
-            icon_address: &[u8],
-        ) -> DispatchResult {
-            let to_insert = SnapshotInfo::default()
-                .ice_address((*ice_addr).clone())
-                .icon_address(icon_address.to_vec());
-
-            // StorageValueRef::local ( fork-aware db ) is not stable ( have issue )
-            // in dependency tree of substrate we are using. So always ::persistent
-            let db_writer = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-
-            // Storage type is VecDeque of SnapshotInfo.
-            // newer request are added at end of the vecdeque so
-            // while assigning the claims we should pop from front
-            // i.e start logic from front to maintain a fair queue system
-            // First-in-first-out
-            // TODO:
-            // Wrap the storage inside lock while writing ( from here ) and reading ( from any other pallets )
-            // And set appropriate lock timeout
-            let writer_status =
-                db_writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
-                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                        prev_storage
-                    } else {
-                        VecDeque::new()
-                    };
-
-                    previous_storage.push_back(to_insert);
-                    Ok(previous_storage)
-                });
-
-            ensure!(writer_status.is_ok(), Error::<T>::OffchainStoreError);
+            // insert this request as fresh entry
+            <PendingClaims<T>>::insert(
+                (*ice_addr).clone(),
+                icon_address.to_vec(),
+                ClaimProcessing::Fresh,
+            );
 
             Ok(())
-        }
-
-        /// Append a new number to the tail of the list, removing an element from the head if reaching
-        ///   the bounded length.
-        fn append_or_replace_number(number: u64) {
-            Numbers::<T>::mutate(|numbers| {
-                if numbers.len() == NUM_VEC_LEN {
-                    let _ = numbers.pop_front();
-                }
-                numbers.push_back(number);
-                log::info!("Number vector: {:?}", numbers);
-            });
-        }
-
-        fn remove_from_onchain_storage(snapshot: &SnapshotInfo<T>) -> Result<(), Error<T>> {
-            let signer = Signer::<T, T::AuthorityId>::any_account();
-            let result = signer.send_signed_transaction(|_accnt| Call::remove_request {
-                key: (snapshot.ice_address.clone(), snapshot.icon_address.clone()),
-            });
-
-            if let Some((acc, res)) = result {
-                if res.is_err() {
-                    log::error!("failure: do_sample_claim: tx sent: {:?}", acc.id);
-                    return Err(<Error<T>>::OffchainSignedTxError);
-                }
-                // Transaction is sent successfully
-                log::info!("Transaction sent successfully by {:?}", acc.id);
-                return Ok(());
-            }
-
-            // The case of `None`: no account is available for sending
-            log::error!("No local account available");
-            Err(<Error<T>>::NoLocalAcctForSigning)
         }
 
         fn do_sample_claim() -> Result<(), Error<T>> {
@@ -672,39 +494,6 @@ pub mod pallet {
             if let Some((acc, res)) = result {
                 if res.is_err() {
                     log::error!("failure: do_sample_claim: tx sent: {:?}", acc.id);
-                    return Err(<Error<T>>::OffchainSignedTxError);
-                }
-                // Transaction is sent successfully
-                log::info!("Transaction sent successfully by {:?}", acc.id);
-                return Ok(());
-            }
-
-            // The case of `None`: no account is available for sending
-            log::error!("No local account available");
-            Err(<Error<T>>::NoLocalAcctForSigning)
-        }
-
-        fn offchain_signed_tx(block_number: T::BlockNumber) -> Result<(), Error<T>> {
-            // We retrieve a signer and check if it is valid.
-            //   Since this pallet only has one key in the keystore. We use `any_account()1 to
-            //   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
-            let signer = Signer::<T, T::AuthorityId>::any_account();
-
-            // Translating the current block number to number and submit it on-chain
-            let number: u64 = block_number.try_into().unwrap_or(0);
-
-            // `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
-            //   - `None`: no account is available for sending transaction
-            //   - `Some((account, Ok(())))`: transaction is successfully sent
-            //   - `Some((account, Err(())))`: error occured when sending the transaction
-            let result = signer.send_signed_transaction(|_acct|
-				// This is the on-chain function
-				Call::submit_number_signed{ number });
-
-            // Display error if the signed tx fails.
-            if let Some((acc, res)) = result {
-                if res.is_err() {
-                    log::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
                     return Err(<Error<T>>::OffchainSignedTxError);
                 }
                 // Transaction is sent successfully
@@ -802,109 +591,6 @@ pub mod pallet {
             Err(<Error<T>>::NoLocalAcctForSigning)
         }
 
-        // fn _process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), &'static str> {
-        //     let signer = Signer::<T, T::AuthorityId>::all_accounts();
-        //     if !signer.can_sign() {
-        //         return Err(
-        //             "No local accounts available. Consider adding one via `author_insertKey` RPC.",
-        //         )?
-        //     }
-
-        //     // new_snapshot will have all the data required in SnapshotInfo structure
-        //     // this includes
-        //     let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or("Fetch claim of failed.")?;
-
-        //     log::info!("Transfer details from server: {:?}", server_response);
-
-        //     let result = signer.send_signed_transaction(|_account| {
-        //         // MAYBE ERROR ???
-        //         Call::_transfer_amount{ receiver: claim_snapshot.ice_address.clone(), amount: server_response.amount.into()}
-        //     });
-
-        //     Ok(())
-        // }
-
-        fn __process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Result<(), Error<T>> {
-            let signer = Signer::<T, T::AuthorityId>::any_account();
-
-            // new_snapshot will have all the data required in SnapshotInfo structure
-            // this includes
-            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)
-                .ok_or(<Error<T>>::NoLocalAcctForSigning)?;
-
-            log::info!("Transfer details from server: {:?}", server_response);
-
-            // let result = signer.send_signed_transaction(|_account| {
-            //     // MAYBE ERROR ???
-            //     Call::_transfer_amount{ receiver: claim_snapshot.ice_address.clone(), amount: server_response.amount.into() }
-            // });
-
-            let result = signer.send_signed_transaction(|_account| {
-                // MAYBE ERROR ???
-                Call::claim_request {
-                    icon_wallet: claim_snapshot.icon_address.clone(),
-                }
-            });
-
-            // Display error if the signed tx fails.
-            if let Some((acc, res)) = result {
-                if res.is_err() {
-                    log::error!("failure: __process_claim_request: tx sent: {:?}", acc.id);
-                    return Err(<Error<T>>::OffchainSignedTxError);
-                }
-                // Transaction is sent successfully
-                log::info!(
-                    "__process_claim_request: Transaction sent successfully by {:?}",
-                    acc.id
-                );
-                return Ok(());
-            }
-
-            // The case of `None`: no account is available for sending
-            log::error!("__process_claim_request: No local account available");
-            Err(<Error<T>>::NoLocalAcctForSigning)
-        }
-
-        // TODO:
-        // Possibly use sudo instead of root
-        fn transfer_amount(receiver: &[u8], amount: u64) {
-            // TODO:
-            // implement transfer logic
-            log::info!(
-                "Crediting account {:?} with amount of {} ",
-                receiver,
-                amount
-            );
-        }
-
-        fn remove_first_from_db() {
-            let remover = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-            let remove_status =
-                remover.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(move |storage| {
-                    let mut previous_storage = if let Ok(Some(prev_storage)) = storage {
-                        prev_storage
-                    } else {
-                        // At this point there will always be at least one data inside storage
-                        // upon which this method was called.
-                        // if control reach this point, it means that this storage have been mutated
-                        // from somewhere else which is unwanted race condition. So we just panic here
-                        unreachable!();
-                    };
-
-                    // Always remove from front as get_next_from_db always return from front
-                    // remember this is vecdeque so complxity of pop_front() = pop_back() = O(0)
-                    previous_storage.pop_front();
-
-                    Ok(previous_storage)
-                });
-
-            if let Err(err) = remove_status {
-                // TODO:
-                // Some proper handeling like retry
-                panic!("Couldn't remove first element forn claim offchain storage. Error: ",);
-            }
-        }
-
         fn fetch_claim_of(icon_address: &[u8]) -> Option<ServerResponse> {
             // TODO:
             // 1) Put actual server url and paramater
@@ -939,31 +625,6 @@ pub mod pallet {
                     log::info!("fetch_from_remote returned with an error: {:?}", err);
                     None
                 }
-            }
-        }
-
-        fn get_next_from_db() -> Option<SnapshotInfo<T>> {
-            let reader = StorageValueRef::persistent(SNAPSHOT_STORAGE_KEY);
-
-            // We do not directly remove snapshot from here
-            // There may be error ( do not necessairly have to be wrong claim )
-            // like http error, offchain panic or so.
-            // That's why we just return first snapshot and removing part is done later
-            // inside process_claim_request
-            if let Ok(Some(claims_list)) = reader.get::<VecDeque<SnapshotInfo<T>>>() {
-                // TODO:
-                // cloning this struct may be heavy process ( as it contains multiple vector )
-                // TODO:
-                // claims_list may also be empty so do length check first
-                if let Some(value) = claims_list.front() {
-                    return Some((*value).clone());
-                } else {
-                    None
-                }
-            } else {
-                // Either there is no claims to handle
-                // or maybe reading from offchain storage failed.
-                None
             }
         }
 
