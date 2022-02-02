@@ -179,7 +179,17 @@ pub mod pallet {
     }
 
     // Server response structure
-    #[derive(Deserialize, Encode, Decode, Clone, Default, RuntimeDebug, scale_info::TypeInfo)]
+    #[derive(
+        Deserialize,
+        Encode,
+        Decode,
+        Clone,
+        Default,
+        Eq,
+        PartialEq,
+        RuntimeDebug,
+        scale_info::TypeInfo,
+    )]
     pub struct ServerResponse {
         #[serde(deserialize_with = "de_string_to_bytes")]
         icon_address: Vec<u8>,
@@ -287,6 +297,9 @@ pub mod pallet {
         // Error returned when not sure which ocw function to executed
         UnknownOffchainMux,
 
+        // Transfer function is failing due to some reason
+        TransferFailed,
+
         // Error returned when making signed transactions in off-chain worker
         NoLocalAcctForSigning,
         OffchainSignedTxError,
@@ -327,19 +340,12 @@ pub mod pallet {
                     .ice_address(claim.0.clone())
                     .icon_address(claim.1.clone());
 
-                let claim_status = Self::process_claim_request(&claim_snapshot);
+                let claim_status = Self::process_claim_request(claim_snapshot);
 
                 if claim_status.is_some() {
                     log::info!("Claim request suceed..");
                 } else {
                     log::info!("Claim request failed..");
-                }
-
-                // TODO: only remove when claim_status is_some()
-                if Self::remove_from_onchain_storage(&claim_snapshot).is_ok() {
-                    log::info!("Remove suceed..");
-                } else {
-                    log::info!("Remove failed...");
                 }
             }
 
@@ -438,6 +444,35 @@ pub mod pallet {
             Self::add_icon_address_to_map(&who, &icon_wallet)?;
             // Self::add_snapshot_to_offchain_db(&who, &icon_wallet)?;
             Self::add_to_request_queue(&who, &icon_wallet)?;
+
+            Ok(())
+        }
+
+        // TODO:
+        // Add proper weight
+        #[pallet::weight(0)]
+        pub fn complete_transfer(
+            origin: OriginFor<T>,
+            ice_address: T::AccountId,
+            icon_address: Vec<u8>,
+            transfer_details: ServerResponse,
+        ) -> DispatchResult {
+            // TODO: make sure this is only called by internal account
+            // missing this check will allow anyone to call this from frontend
+            //
+
+            // TODO:
+            // Waiting for implementation of transfer function
+            let transfer_succeed = true;
+
+            // At this point, transfer has been sucessfully made
+            if transfer_succeed {
+                log::info!("Transfer function suceed. We will remove the data...");
+                // TODO: remove and update flag
+            } else {
+                log::info!("Transfer function failed. We will keep the data..");
+                return Err(Error::<T>::TransferFailed.into());
+            }
 
             Ok(())
         }
@@ -654,7 +689,7 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
         //          None: this claim request have failed
-        fn process_claim_request(claim_snapshot: &SnapshotInfo<T>) -> Option<()> {
+        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Option<()> {
             //     // new_snapshot will have all the data required in SnapshotInfo structure
             //     // this includes
             let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
@@ -667,9 +702,54 @@ pub mod pallet {
             //                      sender= ?? ( maybe root or sudo )?
 
             // TODO: Check for already transfer
-            Self::transfer_amount(&claim_snapshot.icon_address, server_response.amount.into());
+
+            // This function will check for unique transfer per address
+            // and if transfer was made sucessful then
+            // remove from queue map and update status in ice->snapshot map
+            // all in single extrensic call
+            let res = Self::send_complete_transfer_call(
+                server_response,
+                claim_snapshot.ice_address,
+                claim_snapshot.icon_address,
+            );
+
+            if res.is_ok() {
+                log::info!("Transfer call passed...");
+            } else {
+                log::info!("Transfer call failed...");
+            }
 
             Some(())
+        }
+
+        fn send_complete_transfer_call(
+            server_response: ServerResponse,
+            ice_address: T::AccountId,
+            icon_address: Vec<u8>,
+        ) -> Result<(), Error<T>> {
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+            let result = signer.send_signed_transaction(|_signing_account| {
+                // TODO:
+                // We will destruct and send snapshotInfo filed
+                // because it do not satisfy all traits to be sent as argument
+                // TODO: make this call recive less arguments
+                Call::complete_transfer {
+                    icon_address: icon_address.clone(),
+                    ice_address: ice_address.clone(),
+                    transfer_details: server_response.clone(),
+                }
+            });
+
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("While calling complete_transer_call. Transaction error",);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                log::info!("Call::complete_transfer function completed with success",);
+                return Ok(());
+            }
+            log::error!("Call::complete_transfer: No local account available");
+            Err(<Error<T>>::NoLocalAcctForSigning)
         }
 
         // fn _process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), &'static str> {
