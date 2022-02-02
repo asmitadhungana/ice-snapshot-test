@@ -178,7 +178,7 @@ pub mod pallet {
         }
     }
 
-    #[derive(Encode, Decode)]
+    #[derive(Encode, Decode, scale_info::TypeInfo)]
     pub enum ClaimProcessing {
         // this variant indicate that some ocw is currently processing this entry
         OnGoing,
@@ -661,7 +661,7 @@ pub mod pallet {
         }
 
         fn do_sample_claim() -> Result<(), Error<T>> {
-            return Ok(());
+            // return Ok(());
 
             let signer = Signer::<T, T::AuthorityId>::any_account();
             let result = signer.send_signed_transaction(|_accnt| {
@@ -727,7 +727,7 @@ pub mod pallet {
             // TODO:
             // do this check before calling this function
             if let Some(ClaimProcessing::OnGoing) =
-                Self::get_pending_claims(claim_snapshot.ice_address, claim_snapshot.icon_address)
+                Self::get_pending_claims(&claim_snapshot.ice_address, &claim_snapshot.icon_address)
             {
                 return Some(false);
             }
@@ -735,8 +735,8 @@ pub mod pallet {
             // update that we are taking the responsibility
             // and this entry is ongoing on process
             <PendingClaims<T>>::mutate(
-                claim_snapshot.ice_address,
-                claim_snapshot.icon_address,
+                &claim_snapshot.ice_address,
+                &claim_snapshot.icon_address,
                 |_prev_status| ClaimProcessing::OnGoing,
             );
 
