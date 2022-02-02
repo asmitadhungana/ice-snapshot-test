@@ -351,13 +351,26 @@ pub mod pallet {
             log::info!("Getting pending claims..");
             let claims = <PendingClaims<T>>::iter();
 
-            // TODO: [optimization#taking-claim]
-            // we take all the claims. Instead check if that request is ongoing
-            // and ony take if not. This will make sure that this worker
-            // will really process 100 claims
-            // this is done by usiong take_while method
-            // ignored for now for rapid dev
-            for claim in claims.take(CLAIMS_PROCESSING_PER_OCW_RUN) {
+            for claim in claims
+                .filter(|claim| {
+                    if let Some(processing_status) = Self::get_pending_claims(&claim.0, &claim.1) {
+                        match processing_status {
+                            // if this is failed or fresh entry process this
+                            ClaimProcessing::Fresh | ClaimProcessing::Failed => true,
+                            // if this entry is processed by another, skip it
+                            ClaimProcessing::OnGoing => false,
+                        }
+                    } else {
+                        // This block must be unreachable
+                        // if reached this is a race condition that some ocw is not respecting
+                        // ProcessingClaim status or this storage is somwhoe mutated externally
+                        log::info!("Unreachable block reached. This must be analysed...");
+                        false
+                    }
+                })
+                // this is the maximum number of entry to process in single ocw run
+                .take(CLAIMS_PROCESSING_PER_OCW_RUN)
+            {
                 log::info!("Processing new claim request....");
                 let claim_snapshot: SnapshotInfo<T> = SnapshotInfo::default()
                     .ice_address(claim.0.clone())
@@ -365,10 +378,10 @@ pub mod pallet {
 
                 let claim_status = Self::process_claim_request(claim_snapshot);
 
-                match claim_status {
-                    Some(true) => log::info!("Claim processing done sucessfully..."),
-                    Some(false) => log::info!("Claim processing ignored.."),
-                    None => log::info!("Claim processing failed..."),
+                if claim_status.is_ok() {
+                    log::info!("An entry of pending claim have been done sucessfully...");
+                } else {
+                    log::info!("An entry of pending claim have been failed...");
                 }
             }
 
@@ -499,7 +512,7 @@ pub mod pallet {
                     return Err(<Error<T>>::OffchainSignedTxError);
                 }
                 // Transaction is sent successfully
-                log::info!("Transaction sent successfully by {:?}", acc.id);
+                log::info!("\n\n############## Made a sample claim {:?}", acc.id);
                 return Ok(());
             }
 
@@ -511,17 +524,7 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Some(()) when this claim requst have completed with success
         //          None: this claim request have failed
-        // TODO:
-        // after doing optimization#taking-claim change it return type to Option<()>
-        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Option<bool> {
-            // If this is already ongoing then just return
-            // TODO:
-            // do this check before calling this function
-            if let Some(ClaimProcessing::OnGoing) =
-                Self::get_pending_claims(&claim_snapshot.ice_address, &claim_snapshot.icon_address)
-            {
-                return Some(false);
-            }
+        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), ()> {
             log::info!("\n~~~~~~~~~~~ A new claim request processing ~~~~~~~~~\n");
 
             // update that we are taking the responsibility
@@ -532,18 +535,10 @@ pub mod pallet {
                 |_prev_status| ClaimProcessing::OnGoing,
             );
 
-            //     // new_snapshot will have all the data required in SnapshotInfo structure
-            //     // this includes
-            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
+            // Get the response from server regarding this icon_address
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or(())?;
 
             log::info!("Transfer details from server: {:?}", server_response);
-
-            // TODO:
-            // Transfer amount with amount=server_response.amount
-            //                      reciver=claim_snapshot.icon_address or ice_address?
-            //                      sender= ?? ( maybe root or sudo )?
-
-            // TODO: Check for already transfer
 
             // This function will check for unique transfer per address
             // and if transfer was made sucessful then
@@ -555,13 +550,7 @@ pub mod pallet {
                 claim_snapshot.icon_address,
             );
 
-            if res.is_ok() {
-                log::info!("Transfer call passed...");
-            } else {
-                log::info!("Transfer call failed...");
-            }
-
-            Some(true)
+            res.map_err(|_err| ())
         }
 
         fn send_complete_transfer_call(
