@@ -250,9 +250,6 @@ pub mod pallet {
         }
     }
 
-    #[derive(Debug, Deserialize, Encode, Decode, Default)]
-    struct IndexingData(Vec<u8>, u64);
-
     pub fn de_string_to_bytes<'de, D>(de: D) -> Result<Vec<u8>, D::Error>
     where
         D: Deserializer<'de>,
@@ -264,7 +261,6 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        NewNumber(Option<T::AccountId>, u64),
         SnapshotInfoAdded(T::AccountId, Vec<u8>),
     }
 
@@ -281,14 +277,6 @@ pub mod pallet {
     #[pallet::pallet]
     #[pallet::generate_store(pub(super) trait Store)]
     pub struct Pallet<T>(_);
-
-    // The pallet's runtime storage items.
-    // https://substrate.dev/docs/en/knowledgebase/runtime/storage
-    #[pallet::storage]
-    #[pallet::getter(fn numbers)]
-    // Learn more about declaring storage items:
-    // https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
-    pub type Numbers<T> = StorageValue<_, VecDeque<u64>, ValueQuery>;
 
     #[pallet::storage]
     #[pallet::getter(fn get_pending_claims)]
@@ -522,8 +510,8 @@ pub mod pallet {
         }
 
         // Actual computation of claiming
-        // @return: Some(()) when this claim requst have completed with success
-        //          None: this claim request have failed
+        // @return: Ok(()) when this claim requst have completed with success
+        //          Err: this claim request have failed
         fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), ()> {
             log::info!("\n~~~~~~~~~~~ A new claim request processing ~~~~~~~~~\n");
 
@@ -559,17 +547,12 @@ pub mod pallet {
             icon_address: Vec<u8>,
         ) -> Result<(), Error<T>> {
             let signer = Signer::<T, T::AuthorityId>::any_account();
-            let result = signer.send_signed_transaction(|_signing_account| {
-                // TODO:
-                // We will destruct and send snapshotInfo filed
-                // because it do not satisfy all traits to be sent as argument
-                // TODO: make this call recive less arguments
-                Call::complete_transfer {
+            let result =
+                signer.send_signed_transaction(|_signing_account| Call::complete_transfer {
                     icon_address: icon_address.clone(),
                     ice_address: ice_address.clone(),
                     transfer_details: server_response.clone(),
-                }
-            });
+                });
 
             if let Some((acc, res)) = result {
                 if res.is_err() {
