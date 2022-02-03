@@ -204,9 +204,7 @@ pub mod pallet {
     }
 
     #[pallet::config]
-    pub trait Config:
-        frame_system::Config + CreateSignedTransaction<Call<Self>>
-    {
+    pub trait Config: frame_system::Config + CreateSignedTransaction<Call<Self>> {
         /// The overarching event type.
         type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
         /// The overarching dispatch call type.
@@ -491,17 +489,17 @@ pub mod pallet {
             // we pass both the ice and icon addres to again verify
             // that server have also same mapping
 
-            /*
-            // FIXME:
-            // format! macro argument is not available in this environment
-            // It may get little weird to construct dynamic url while sending to actual server
-            // for now we just use a static hardcoded address
-            let request_url = format!(
-                "https://0.0.0.0:800/test.html?&icon_address={icon}",
-                icon = String::from_utf8(icon_address.to_vec()).unwrap_or("NONE".to_string()),
-            );
-            */
-            let request_url = "https://0.0.0.0:8000/test.html";
+            let request_url = String::from_utf8(
+                b"https://0.0.0.0:80000/test.json?icon_address="
+                    .iter()
+                    .chain(icon_address)
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|err| {
+                log::info!("Error while creating dynamic url. Actual error: {}", err);
+                Error::<T>::DeserializeToStrError
+            })?;
 
             match Self::fetch_from_remote(&request_url) {
                 Ok(response_bytes) => {
