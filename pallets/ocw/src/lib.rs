@@ -14,58 +14,6 @@ use sp_std::vec::Vec;
 // storage by same key which will override the data of another pallet
 pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
-// Data structure to keep on offchain as well as onchain storage
-// TODO:
-// We might not need all this much of field?
-// #[derive(Encode, Decode, Clone, Default, RuntimeDebug, scale_info::TypeInfo)]
-// pub struct SnapshotInfo {
-//     icon_address: Vec<u8>,
-//     ice_address: Vec<u8>,
-//     amount: u32,
-//     defi_user: bool,
-//     vesting_percentage: u32,
-// }
-
-// // Server response structure
-// #[derive(Deserialize, Encode, Decode, Clone, Default, RuntimeDebug, scale_info::TypeInfo)]
-// pub struct ServerResponse {
-//     #[serde(deserialize_with = "de_string_to_bytes")]
-//     icon_address: Vec<u8>,
-//     amount: u32,
-//     defi_user: bool,
-//     vesting_percentage: u32,
-//     // TODO:
-//     // specify all fields
-// }
-
-// // implement builder pattern
-// impl SnapshotInfo {
-//     pub fn icon_address(mut self, val: Vec<u8>) -> Self {
-//         self.icon_address = val;
-//         self
-//     }
-
-//     pub fn ice_address(mut self, val: Vec<u8>) -> Self {
-//         self.ice_address = val;
-//         self
-//     }
-
-//     pub fn amount(mut self, val: u32) -> Self {
-//         self.amount = val;
-//         self
-//     }
-
-//     pub fn defi_user(mut self, val: bool) -> Self {
-//         self.defi_user = val;
-//         self
-//     }
-
-//     pub fn vesting_percentage(mut self, val: u32) -> Self {
-//         self.vesting_percentage = val;
-//         self
-//     }
-// }
-
 #[frame_support::pallet]
 pub mod pallet {
     // pub use crate::{ServerResponse, SnapshotInfo, SNAPSHOT_STORAGE_KEY};
@@ -75,6 +23,7 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_support::storage::IterableStorageDoubleMap;
     use frame_support::{dispatch::DispatchResult, error::LookupError};
+    use frame_system::RawOrigin;
     use frame_system::{
         offchain::{
             AppCrypto, CreateSignedTransaction, SendSignedTransaction, SendUnsignedTransaction,
@@ -255,7 +204,9 @@ pub mod pallet {
     }
 
     #[pallet::config]
-    pub trait Config: frame_system::Config + CreateSignedTransaction<Call<Self>> {
+    pub trait Config:
+        frame_system::Config + CreateSignedTransaction<Call<Self>>
+    {
         /// The overarching event type.
         type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
         /// The overarching dispatch call type.
@@ -278,6 +229,33 @@ pub mod pallet {
     #[pallet::getter(fn get_ice_snapshot_map)]
     pub(super) type IceSnapshotMap<T: Config> =
         StorageMap<_, Identity, T::AccountId, SnapshotInfo<T>, OptionQuery>;
+
+    #[pallet::storage]
+    pub(super) type AuthorisedAccounts<T: Config> =
+        StorageMap<_, Identity, T::AccountId, (), OptionQuery>;
+
+    #[pallet::genesis_config]
+    pub struct GenesisConfig<T: Config> {
+        pub authorised_accounts: sp_std::vec::Vec<T::AccountId>,
+    }
+
+    #[cfg(feature = "std")]
+    impl<T: Config> Default for GenesisConfig<T> {
+        fn default() -> Self {
+            Self {
+                authorised_accounts: sp_std::vec![],
+            }
+        }
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
+        fn build(&self) {
+            for account_id in &self.authorised_accounts {
+                <AuthorisedAccounts<T>>::insert(account_id, ());
+            }
+        }
+    }
 
     // Errors inform users that something went wrong.
     #[pallet::error]
@@ -305,6 +283,8 @@ pub mod pallet {
 
         OffchainStoreError,
         ClaimAlreadyMade,
+
+        AccessDenied,
     }
 
     #[pallet::hooks]
@@ -378,14 +358,17 @@ pub mod pallet {
             ice_address: T::AccountId,
             icon_address: Vec<u8>,
             transfer_details: ServerResponse,
-        ) -> DispatchResult {
-            // TODO: make sure this is only called by internal account
-            // missing this check will allow anyone to call this from frontend
-            //
+        ) -> DispatchResultWithPostInfo {
+            let signer = ensure_signed(origin)?;
+
+            // TODO: For now it is locally maintained list
+            // use sudo in future
+            let is_authorised = <AuthorisedAccounts<T>>::contains_key(signer);
+            ensure!(is_authorised, Error::<T>::AccessDenied);
 
             // TODO:
             // Waiting for implementation of transfer function
-            let transfer_status: DispatchResult = Ok(());
+            let transfer_status: DispatchResultWithPostInfo = Ok(().into());
 
             // At this point, transfer has been sucessfully made
             if transfer_status.is_ok() {
@@ -482,14 +465,12 @@ pub mod pallet {
             log::info!("Transfer details from server: {:?}", server_response);
 
             let signer = Signer::<T, T::AuthorityId>::any_account();
-            let result = signer.send_signed_transaction(move |_signing_account| {
-                // Call the extrinsic
-                Call::complete_transfer {
+            let result =
+                signer.send_signed_transaction(move |_signing_account| Call::complete_transfer {
                     icon_address: claim_snapshot.icon_address.clone(),
                     ice_address: claim_snapshot.ice_address.clone(),
                     transfer_details: server_response.clone(),
-                }
-            });
+                });
 
             if let Some((_acc, res)) = result {
                 if res.is_err() {
@@ -592,10 +573,15 @@ pub mod pallet {
     }
 }
 
-// Step 1: fetch from offchain db: fetch_from_offchain_db()
-// Step 2: for each wallet, pull from external server: fetch_from_remote()
-// Step 3: Transfer to fetched ice_address with fetched amount
-
-// TODO: @asmee: Optimize offchain db for many claim entries: maybe keep different ids for each 100 claims
-//       @sudip: Or maybe just keep everything inside single key id? One seeming downside is that offchain storage may possible become large if lots of claims are made within single node. Anyway as offchain db is maintained with key/value pair i.e accessing an element from db with key is always O(0). If above-mentioned optimization needed to be done, instead maybe just process 100 iteration in offchain worker loop?
-// TODO: pop from the storage
+// TODO:
+// Question: Do substrate roll back it's state including the storage mutation before failing
+// Current Assumtion: No ( reference: https://docs.substrate.io/v3/runtime/storage/#verify-first-write-last )
+//
+// But It was assumed that storage is rollbacked (just like in RDBMS) if any extrinsic call fails
+// So do all the check first in claim_request
+// Up until now, we are following the pattern:
+// check1 [passed] -> mutate -> check2 -> mutate -> check2 [failed] -> fail
+// now the pattern need to be change to
+// check1 [passed] -> chech2 [passed] -> check3 [passed] -> mutate -> mutate -> mutate -> pass
+// or in case of failure
+// check1 [passed] -> check2 [passed] -> check3 [failed] -> return // no mutation occured
