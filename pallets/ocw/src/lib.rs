@@ -484,11 +484,10 @@ pub mod pallet {
 
         fn fetch_claim_of(icon_address: &[u8]) -> Result<ServerResponse, Error<T>> {
             // TODO:
-            // 1) Put actual server url and paramater
-            // NOTE:
-            // we pass both the ice and icon addres to again verify
-            // that server have also same mapping
-
+            // for now we are sending one request at a time
+            // instead pass the array of icon address with length MAX_PROCESSING_PER_OCW
+            // and this will finish the ocw worker with single http request per ocw
+            // saving time in http request would be huge gain
             let request_url = String::from_utf8(
                 b"https://0.0.0.0:80000/test.json?icon_address="
                     .iter()
