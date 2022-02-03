@@ -178,16 +178,6 @@ pub mod pallet {
         }
     }
 
-    #[derive(Encode, Decode, scale_info::TypeInfo)]
-    pub enum ClaimProcessing {
-        // this variant indicate that some ocw is currently processing this entry
-        OnGoing,
-        // no offchain worker has ever touched this
-        Fresh,
-        // an offchain worker tried to process this entry but failed
-        Failed,
-    }
-
     // Server response structure
     #[derive(
         Deserialize,
@@ -280,15 +270,8 @@ pub mod pallet {
 
     #[pallet::storage]
     #[pallet::getter(fn get_pending_claims)]
-    pub type PendingClaims<T: Config> = StorageDoubleMap<
-        _,
-        Identity,
-        T::AccountId,
-        Twox64Concat,
-        Vec<u8>,
-        ClaimProcessing,
-        OptionQuery,
-    >;
+    pub type PendingClaims<T: Config> =
+        StorageDoubleMap<_, Identity, T::AccountId, Twox64Concat, Vec<u8>, (), OptionQuery>;
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
@@ -326,7 +309,7 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn offchain_worker(block_number: T::BlockNumber) {
+        fn offchain_worker(_block_number: T::BlockNumber) {
             log::info!("\n\n====================\nOffchain worker started\n=================\n");
 
             log::info!("Making sample claim.....");
@@ -337,32 +320,17 @@ pub mod pallet {
             }
 
             log::info!("Getting pending claims..");
-            let claims = <PendingClaims<T>>::iter();
 
-            for claim in claims
-                .filter(|claim| {
-                    if let Some(processing_status) = Self::get_pending_claims(&claim.0, &claim.1) {
-                        match processing_status {
-                            // if this is failed or fresh entry process this
-                            ClaimProcessing::Fresh | ClaimProcessing::Failed => true,
-                            // if this entry is processed by another, skip it
-                            ClaimProcessing::OnGoing => false,
-                        }
-                    } else {
-                        // This block must be unreachable
-                        // if reached this is a race condition that some ocw is not respecting
-                        // ProcessingClaim status or this storage is somwhoe mutated externally
-                        log::info!("Unreachable block reached. This must be analysed...");
-                        false
-                    }
-                })
+            let claims_to_process: Vec<(T::AccountId, Vec<u8>, _)> = <PendingClaims<T>>::iter()
                 // this is the maximum number of entry to process in single ocw run
                 .take(CLAIMS_PROCESSING_PER_OCW_RUN)
-            {
+                .collect();
+
+            for claim in claims_to_process {
                 log::info!("Processing new claim request....");
                 let claim_snapshot: SnapshotInfo<T> = SnapshotInfo::default()
-                    .ice_address(claim.0.clone())
-                    .icon_address(claim.1.clone());
+                    .ice_address(claim.0)
+                    .icon_address(claim.1);
 
                 let claim_status = Self::process_claim_request(claim_snapshot);
 
@@ -425,10 +393,6 @@ pub mod pallet {
                 log::info!("Transfer function suceed and request have been removed frm queue");
             } else {
                 log::info!("Transfer function failed. We will keep the data..");
-                // state that this claim request failed
-                <PendingClaims<T>>::mutate(ice_address, icon_address, |_prev| {
-                    ClaimProcessing::Failed
-                });
             }
 
             transfer_status
@@ -476,11 +440,7 @@ pub mod pallet {
             log::info!("Adding new entry to queue");
 
             // insert this request as fresh entry
-            <PendingClaims<T>>::insert(
-                (*ice_addr).clone(),
-                icon_address.to_vec(),
-                ClaimProcessing::Fresh,
-            );
+            <PendingClaims<T>>::insert((*ice_addr).clone(), icon_address.to_vec(), ());
 
             Ok(())
         }
@@ -512,49 +472,26 @@ pub mod pallet {
         // Actual computation of claiming
         // @return: Ok(()) when this claim requst have completed with success
         //          Err: this claim request have failed
-        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), ()> {
+        fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), Error<T>> {
             log::info!("\n~~~~~~~~~~~ A new claim request processing ~~~~~~~~~\n");
 
-            // update that we are taking the responsibility
-            // and this entry is ongoing on process
-            <PendingClaims<T>>::mutate(
-                &claim_snapshot.ice_address,
-                &claim_snapshot.icon_address,
-                |_prev_status| ClaimProcessing::OnGoing,
-            );
-
             // Get the response from server regarding this icon_address
-            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address).ok_or(())?;
-
+            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
+            // TODO:
+            // handle this error from server_response
             log::info!("Transfer details from server: {:?}", server_response);
 
-            // This function will check for unique transfer per address
-            // and if transfer was made sucessful then
-            // remove from queue map and update status in ice->snapshot map
-            // all in single extrensic call
-            let res = Self::send_complete_transfer_call(
-                server_response,
-                claim_snapshot.ice_address,
-                claim_snapshot.icon_address,
-            );
-
-            res.map_err(|_err| ())
-        }
-
-        fn send_complete_transfer_call(
-            server_response: ServerResponse,
-            ice_address: T::AccountId,
-            icon_address: Vec<u8>,
-        ) -> Result<(), Error<T>> {
             let signer = Signer::<T, T::AuthorityId>::any_account();
-            let result =
-                signer.send_signed_transaction(|_signing_account| Call::complete_transfer {
-                    icon_address: icon_address.clone(),
-                    ice_address: ice_address.clone(),
+            let result = signer.send_signed_transaction(move |_signing_account| {
+                // Call the extrinsic
+                Call::complete_transfer {
+                    icon_address: claim_snapshot.icon_address.clone(),
+                    ice_address: claim_snapshot.ice_address.clone(),
                     transfer_details: server_response.clone(),
-                });
+                }
+            });
 
-            if let Some((acc, res)) = result {
+            if let Some((_acc, res)) = result {
                 if res.is_err() {
                     log::error!("While calling complete_transer_call. Transaction error",);
                     return Err(<Error<T>>::OffchainSignedTxError);
@@ -566,7 +503,7 @@ pub mod pallet {
             Err(<Error<T>>::NoLocalAcctForSigning)
         }
 
-        fn fetch_claim_of(icon_address: &[u8]) -> Option<ServerResponse> {
+        fn fetch_claim_of(icon_address: &[u8]) -> Result<ServerResponse, Error<T>> {
             // TODO:
             // 1) Put actual server url and paramater
             // NOTE:
@@ -586,24 +523,22 @@ pub mod pallet {
             let request_url = "https://0.0.0.0:8000/test.html";
 
             match Self::fetch_from_remote(&request_url) {
-                Ok(response) => {
-                    if let Ok(info) = serde_json::from_slice(response.as_slice()) {
-                        Some(info)
-                    } else {
-                        log::info!("Couldnot destruct http response to json struct..");
-                        // response is not a valid json
-                        None
-                    }
+                Ok(response_bytes) => {
+                    serde_json::from_slice(response_bytes.as_slice()).map_err(|err| {
+                        log::info!("Couldn't destruct into Response struct probably due to invalid json format from server. Actual error: {}", err);
+
+                        Error::<T>::DeserializeToObjError
+                    })
                 }
-                Err(err) => {
-                    // TODO: See the error of http resuest and retry if that will help
-                    log::info!("fetch_from_remote returned with an error: {:?}", err);
-                    None
+                Err(_err) => {
+                    // TODO: handle error
+                    log::info!("fetch_from_remote function call failed..");
+                    Err(Error::<T>::HttpFetchingError)
                 }
             }
         }
 
-        fn fetch_from_remote(request_url: &str) -> Result<Vec<u8>, Error<T>> {
+        fn fetch_from_remote(request_url: &str) -> Result<Vec<u8>, ()> {
             // TODO:
             // This function will currently always panic with tokio contect error.
             // Reason: The dependency on use in this project is always based on commit hash from github
@@ -632,19 +567,16 @@ pub mod pallet {
                 .send() // Sending the request out by the host
                 .map_err(|e| {
                     log::info!("Error while waiting for pending request{:?}", e);
-                    <Error<T>>::HttpFetchingError
+                    ()
                 })?;
 
             log::info!("Initilizing response variable...");
-            let response = pending
-                .try_wait(timeout)
-                .map_err(|_| <Error<T>>::HttpFetchingError)?
-                .map_err(|_| <Error<T>>::HttpFetchingError)?;
+            let response = pending.try_wait(timeout).map_err(|_| ())?.map_err(|_| ())?;
 
             if response.code != 200 {
                 log::info!("Unexpected HTTP request status code: {}", response.code);
 
-                return Err(<Error<T>>::HttpFetchingError);
+                return Err(());
             }
 
             Ok(response.body().collect())
