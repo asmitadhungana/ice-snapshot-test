@@ -365,8 +365,6 @@ pub mod pallet {
             let is_authorised = <AuthorisedAccounts<T>>::contains_key(signer);
             ensure!(is_authorised, Error::<T>::AccessDenied);
 
-            // TODO:
-            // Waiting for implementation of transfer function
             let transfer_status: DispatchResultWithPostInfo =
                 if let Some(transfer_details) = transfer_details {
                     // TODO:
@@ -377,6 +375,10 @@ pub mod pallet {
                     // we just have to remove the entry
                     Ok(().into())
                 };
+
+            // TODO:
+            // update onchain data of SnapshotInfoMap with new data like
+            // de-fi user etc.
 
             // At this point, transfer has been sucessfully made
             if transfer_status.is_ok() {
