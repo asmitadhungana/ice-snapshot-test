@@ -257,6 +257,7 @@ pub mod pallet {
 
     // Errors inform users that something went wrong.
     #[pallet::error]
+    #[derive(Eq, PartialEq)]
     pub enum Error<T> {
         // Error returned when not sure which ocw function to executed
         UnknownOffchainMux,
@@ -281,7 +282,7 @@ pub mod pallet {
 
         OffchainStoreError,
         ClaimAlreadyMade,
-
+        NoDataInServer,
         AccessDenied,
     }
 
@@ -355,7 +356,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             ice_address: T::AccountId,
             icon_address: Vec<u8>,
-            transfer_details: ServerResponse,
+            transfer_details: Option<ServerResponse>,
         ) -> DispatchResultWithPostInfo {
             let signer = ensure_signed(origin)?;
 
@@ -366,7 +367,16 @@ pub mod pallet {
 
             // TODO:
             // Waiting for implementation of transfer function
-            let transfer_status: DispatchResultWithPostInfo = Ok(().into());
+            let transfer_status: DispatchResultWithPostInfo =
+                if let Some(transfer_details) = transfer_details {
+                    // TODO:
+                    // do actual transfer logic
+                    Ok(().into())
+                } else {
+                    // if None is passed in server response then
+                    // we just have to remove the entry
+                    Ok(().into())
+                };
 
             // At this point, transfer has been sucessfully made
             if transfer_status.is_ok() {
@@ -456,12 +466,21 @@ pub mod pallet {
         fn process_claim_request(claim_snapshot: SnapshotInfo<T>) -> Result<(), Error<T>> {
             log::info!("\n~~~~~~~~~~~ A new claim request processing ~~~~~~~~~\n");
 
-            // Get the response from server regarding this icon_address
-            let server_response = Self::fetch_claim_of(&claim_snapshot.icon_address)?;
-            // TODO:
-            // handle this error from server_response
-            log::info!("Transfer details from server: {:?}", server_response);
+            // fetch the details from server
+            let fetch_res = Self::fetch_claim_of(&claim_snapshot.icon_address);
+            let server_response = match fetch_res {
+                // normally do the further processing
+                Ok(response) => Some(response),
 
+                // There is no corresponding data for this icon address in server
+                // In this case, just delete the entry from mapping
+                Err(err) if err == Error::<T>::NoDataInServer => None,
+
+                // propagate the error
+                Err(err) => return Err(err),
+            };
+
+            // prepare to send the transaction
             let signer = Signer::<T, T::AuthorityId>::any_account();
             let result =
                 signer.send_signed_transaction(move |_signing_account| Call::complete_transfer {
@@ -470,6 +489,7 @@ pub mod pallet {
                     transfer_details: server_response.clone(),
                 });
 
+            // check if above disptachable call succeed ans display respective message
             if let Some((_acc, res)) = result {
                 if res.is_err() {
                     log::error!("While calling complete_transer_call. Transaction error",);
@@ -488,7 +508,7 @@ pub mod pallet {
             // instead pass the array of icon address with length MAX_PROCESSING_PER_OCW
             // and this will finish the ocw worker with single http request per ocw
             // saving time in http request would be huge gain
-            let request_url = String::from_utf8(
+            let request_url = parity_scale_codec::alloc::string::String::from_utf8(
                 b"https://0.0.0.0:80000/test.json?icon_address="
                     .iter()
                     .chain(icon_address)
@@ -496,8 +516,8 @@ pub mod pallet {
                     .collect(),
             )
             .map_err(|err| {
-                log::info!("Error while creating dynamic url. Actual error: {}", err);
-                Error::<T>::DeserializeToStrError
+                log::info!("Error while encoding dynamic url. Error: {}", err);
+                Error::DeserializeToStrError
             })?;
 
             match Self::fetch_from_remote(&request_url) {
@@ -505,25 +525,21 @@ pub mod pallet {
                     serde_json::from_slice(response_bytes.as_slice()).map_err(|err| {
                         log::info!("Couldn't destruct into Response struct probably due to invalid json format from server. Actual error: {}", err);
 
-                        Error::<T>::DeserializeToObjError
+                        Error::DeserializeToObjError
                     })
                 }
-                Err(_err) => {
-                    // TODO: handle error
+                Err(err) => {
                     log::info!("fetch_from_remote function call failed..");
-                    Err(Error::<T>::HttpFetchingError)
+                    Err(err)
                 }
             }
         }
 
-        fn fetch_from_remote(request_url: &str) -> Result<Vec<u8>, ()> {
-            // TODO:
-            // This function will currently always panic with tokio contect error.
-            // Reason: The dependency on use in this project is always based on commit hash from github
-            //      and not on any specific tag or version. This lead to use of two different tokio version
-            //      i.e tokio 0.x and tokio 1.x. Major version change in tokio and intermixing them creates contect error
-            // Possible Solution: Work on whole project to use well stabilized tag of both substrate & frontier
-            //
+        // @return:
+        // Ok(Vec<u8>) => server return some data with status 200
+        // Err(true) => Fetching failed with some other errror,
+        //              true specify that
+        fn fetch_from_remote(request_url: &str) -> Result<Vec<u8>, Error<T>> {
             // For this reason we just return the sample response hardcoded in bytes
             let sample_response = r##"{
                 "icon_address":"10001",
@@ -545,19 +561,24 @@ pub mod pallet {
                 .send() // Sending the request out by the host
                 .map_err(|e| {
                     log::info!("Error while waiting for pending request{:?}", e);
-                    ()
+                    Error::HttpFetchingError
                 })?;
 
             log::info!("Initilizing response variable...");
-            let response = pending.try_wait(timeout).map_err(|_| ())?.map_err(|_| ())?;
+            let response = pending
+                .try_wait(timeout)
+                .map_err(|_| Error::HttpFetchingError)?
+                .map_err(|_| Error::HttpFetchingError)?;
 
-            if response.code != 200 {
+            if response.code == 200 {
+                Ok(response.body().collect())
+            } else if response.code == 404 {
+                log::info!("Server returned 404 status...");
+                Err(Error::NoDataInServer)
+            } else {
                 log::info!("Unexpected HTTP request status code: {}", response.code);
-
-                return Err(());
+                Err(Error::HttpFetchingError)
             }
-
-            Ok(response.body().collect())
         }
     }
 
