@@ -219,8 +219,7 @@ pub mod pallet {
 
     #[pallet::storage]
     #[pallet::getter(fn get_pending_claims)]
-    pub type PendingClaims<T: Config> =
-        StorageDoubleMap<_, Identity, T::AccountId, Twox64Concat, Vec<u8>, (), OptionQuery>;
+    pub type PendingClaims<T: Config> = StorageMap<_, Identity, T::AccountId, (), OptionQuery>;
 
     /// IceAddress -> Pending claim request snapshot
     #[pallet::storage]
@@ -300,7 +299,12 @@ pub mod pallet {
 
             log::info!("Getting pending claims..");
 
-            let claims_to_process: Vec<(T::AccountId, Vec<u8>, _)> = <PendingClaims<T>>::iter()
+            let claims_to_process: Vec<(T::AccountId, Vec<u8>)> = <PendingClaims<T>>::iter()
+                // While collecting also take corresponding icon address
+                .filter_map(|(ice_address, _)| {
+                    let snapshot_of_ice = Self::get_ice_snapshot_map(ice_address)?;
+                    Some((ice_address, snapshot_of_ice.icon_address))
+                })
                 // this is the maximum number of entry to process in single ocw run
                 .take(CLAIMS_PROCESSING_PER_OCW_RUN)
                 .collect();
@@ -336,6 +340,26 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             // let signer = hex::encode(who.encode());
             // let signer = signer.as_bytes();
+
+            let already_exists_in_map = <IceSnapshotMap<T>>::contains_key(&who);
+            let already_exists_in_queue = <PendingClaims<T>>::contains_key(&who);
+
+            // TODO:
+            // remove these log messages in production
+            {
+                if already_exists_in_map {
+                    log::info!("This entry already exists in ice->snapshot map");
+                }
+                if already_exists_in_queue {
+                    log::info!("This entry already exists in queue");
+                }
+            }
+
+            // Ensure that this entry neither exists in request queue nor ice->snapshot map
+            ensure!(
+                !already_exists_in_queue && !already_exists_in_map,
+                Error::<T>::ClaimAlreadyMade
+            );
 
             // Self::validate_signature(&signer, &icon_signature, &icon_wallet, &tx_obj)?;
 
@@ -382,7 +406,7 @@ pub mod pallet {
 
             // At this point, transfer has been sucessfully made
             if transfer_status.is_ok() {
-                <PendingClaims<T>>::remove(ice_address, icon_address);
+                <PendingClaims<T>>::remove(ice_address);
                 log::info!("Transfer function suceed and request have been removed frm queue");
             } else {
                 log::info!("Transfer function failed. We will keep the data..");
@@ -394,13 +418,6 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
-            let already_exists = <IceSnapshotMap<T>>::contains_key(&signer);
-
-            if already_exists {
-                log::info!("This entry already exists in ice->snapshot map");
-                return Err(Error::<T>::ClaimAlreadyMade.into());
-            }
-
             log::info!("Adding new entry to ice->snapshot map");
 
             // create default snapshot with only ice & icon address populated
@@ -423,17 +440,8 @@ pub mod pallet {
         }
 
         fn add_to_request_queue(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
-            let already_exists = <PendingClaims<T>>::contains_key(ice_addr, icon_address);
-
-            if already_exists {
-                log::info!("This entry already exists in queue..");
-                return Err(Error::<T>::ClaimAlreadyMade.into());
-            }
-
-            log::info!("Adding new entry to queue");
-
             // insert this request as fresh entry
-            <PendingClaims<T>>::insert((*ice_addr).clone(), icon_address.to_vec(), ());
+            <PendingClaims<T>>::insert((*ice_addr).clone(), ());
 
             Ok(())
         }
@@ -592,16 +600,3 @@ pub mod pallet {
         }
     }
 }
-
-// TODO:
-// Question: Do substrate roll back it's state including the storage mutation before failing
-// Current Assumtion: No ( reference: https://docs.substrate.io/v3/runtime/storage/#verify-first-write-last )
-//
-// But It was assumed that storage is rollbacked (just like in RDBMS) if any extrinsic call fails
-// So do all the check first in claim_request
-// Up until now, we are following the pattern:
-// check1 [passed] -> mutate -> check2 -> mutate -> check2 [failed] -> fail
-// now the pattern need to be change to
-// check1 [passed] -> chech2 [passed] -> check3 [passed] -> mutate -> mutate -> mutate -> pass
-// or in case of failure
-// check1 [passed] -> check2 [passed] -> check3 [failed] -> return // no mutation occured
