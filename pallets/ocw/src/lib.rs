@@ -140,13 +140,11 @@ pub mod pallet {
         scale_info::TypeInfo,
     )]
     pub struct ServerResponse {
-        #[serde(deserialize_with = "de_string_to_bytes")]
-        icon_address: Vec<u8>,
-        amount: u32,
+        omm: u32,
+        #[serde(rename = "balanced")]
+        balance: u128,
+        stake: u128,
         defi_user: bool,
-        vesting_percentage: u32,
-        // TODO:
-        // specify all fields
     }
 
     // implement builder pattern
@@ -302,7 +300,7 @@ pub mod pallet {
             let claims_to_process: Vec<(T::AccountId, Vec<u8>)> = <PendingClaims<T>>::iter()
                 // While collecting also take corresponding icon address
                 .filter_map(|(ice_address, _)| {
-                    let snapshot_of_ice = Self::get_ice_snapshot_map(ice_address)?;
+                    let snapshot_of_ice = Self::get_ice_snapshot_map(&ice_address)?;
                     Some((ice_address, snapshot_of_ice.icon_address))
                 })
                 // this is the maximum number of entry to process in single ocw run
@@ -490,6 +488,8 @@ pub mod pallet {
                 Err(err) => return Err(err),
             };
 
+            log::info!("Response from server: {:#?}", server_response);
+
             // prepare to send the transaction
             let signer = Signer::<T, T::AuthorityId>::any_account();
             let result =
@@ -519,7 +519,7 @@ pub mod pallet {
             // and this will finish the ocw worker with single http request per ocw
             // saving time in http request would be huge gain
             let request_url = parity_scale_codec::alloc::string::String::from_utf8(
-                b"https://0.0.0.0:80000/test.json?icon_address="
+                b"http://35.175.202.72:5000/claimDetails?address="
                     .iter()
                     .chain(icon_address)
                     .cloned()
@@ -550,15 +550,6 @@ pub mod pallet {
         // Err(true) => Fetching failed with some other errror,
         //              true specify that
         fn fetch_from_remote(request_url: &str) -> Result<Vec<u8>, Error<T>> {
-            // For this reason we just return the sample response hardcoded in bytes
-            let sample_response = r##"{
-                "icon_address":"10001",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":10
-            }"##;
-            return Ok(sample_response.as_bytes().to_vec());
-
             log::info!("Sending request to: {}", request_url);
 
             let request = http::Request::get(request_url);
