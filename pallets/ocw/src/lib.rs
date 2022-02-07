@@ -396,6 +396,25 @@ pub mod pallet {
 
             Ok(())
         }
+
+        #[pallet::weight(0)]
+        pub fn transfer_fund(
+            origin: OriginFor<T>,
+            reciver: T::AccountId,
+            amount: u128,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin);
+
+            // TODO: check if this sender can call the function
+
+            log::info!(
+                "Crediting account {:?} with amount {} unit",
+                reciver,
+                amount
+            );
+
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -551,6 +570,8 @@ pub mod pallet {
             // return early
             // note that we do not panic here because use should be able to do claim
             // in multiple nodes ( if one node fails to process the request )
+            //
+            // However note that we should not override the values
             if !is_new_map {
                 return Ok(());
             }
