@@ -445,7 +445,7 @@ pub mod pallet {
         }
 
         fn do_sample_claim() -> Result<(), Error<T>> {
-            // return Ok(());
+            return Ok(());
 
             let signer = Signer::<T, T::AuthorityId>::any_account();
             let result = signer.send_signed_transaction(|_accnt| {
@@ -519,9 +519,9 @@ pub mod pallet {
             // and this will finish the ocw worker with single http request per ocw
             // saving time in http request would be huge gain
             let request_url = parity_scale_codec::alloc::string::String::from_utf8(
-                b"http://35.175.202.72:5000/claimDetails?address="
+                b"http://35.175.202.72:5000/claimDetails?address=0x"
                     .iter()
-                    .chain(icon_address)
+                    .chain(hex::encode(icon_address).as_bytes())
                     .cloned()
                     .collect(),
             )
