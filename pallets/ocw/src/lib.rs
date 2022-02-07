@@ -16,57 +16,11 @@ pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
 pub const BATCHING_BLOCK: u8 = 5;
 
-// Data structure to keep on offchain as well as onchain storage
-// TODO:
-// We might not need all this much of field?
-// #[derive(Encode, Decode, Clone, Default, RuntimeDebug, scale_info::TypeInfo)]
-// pub struct SnapshotInfo {
-//     icon_address: Vec<u8>,
-//     ice_address: Vec<u8>,
-//     amount: u32,
-//     defi_user: bool,
-//     vesting_percentage: u32,
-// }
-
-// // Server response structure
-// #[derive(Deserialize, Encode, Decode, Clone, Default, RuntimeDebug, scale_info::TypeInfo)]
-// pub struct ServerResponse {
-//     #[serde(deserialize_with = "de_string_to_bytes")]
-//     icon_address: Vec<u8>,
-//     amount: u32,
-//     defi_user: bool,
-//     vesting_percentage: u32,
-//     // TODO:
-//     // specify all fields
-// }
-
-// // implement builder pattern
-// impl SnapshotInfo {
-//     pub fn icon_address(mut self, val: Vec<u8>) -> Self {
-//         self.icon_address = val;
-//         self
-//     }
-
-//     pub fn ice_address(mut self, val: Vec<u8>) -> Self {
-//         self.ice_address = val;
-//         self
-//     }
-
-//     pub fn amount(mut self, val: u32) -> Self {
-//         self.amount = val;
-//         self
-//     }
-
-//     pub fn defi_user(mut self, val: bool) -> Self {
-//         self.defi_user = val;
-//         self
-//     }
-
-//     pub fn vesting_percentage(mut self, val: u32) -> Self {
-//         self.vesting_percentage = val;
-//         self
-//     }
-// }
+#[derive(Deserialize, RuntimeDebug)]
+enum ServerResponseError {
+    NoData,
+    ServerError,
+}
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -155,7 +109,7 @@ pub mod pallet {
 
     // type AccountOf<T> = <T as frame_system::Config>::AccountId;
 
-    #[derive(Encode, Decode, Clone, RuntimeDebug, scale_info::TypeInfo)]
+    #[derive(Encode, RuntimeDebug, Decode, Clone, scale_info::TypeInfo)]
     #[scale_info(skip_type_params(T))]
     pub struct SnapshotInfo<T: Config> {
         icon_address: Vec<u8>,
@@ -302,6 +256,10 @@ pub mod pallet {
 
         OffchainStoreError,
         ClaimAlreadyMade,
+
+        // this indicate that given icon address do not exists in server
+        // so we neither do transfer nor will save this as failed claim
+        NoDataInServer,
     }
 
     #[pallet::hooks]
@@ -347,26 +305,60 @@ pub mod pallet {
             let key = Self::get_storage_key(&block_number);
             let db_reader = StorageValueRef::persistent(&key);
 
-            let all_values = db_reader.get::<Vec<SnapshotInfo<T>>>();
-            let all_values = if let Ok(Some(values)) = all_values {
-                if values.is_empty() {
-                    log::info!("\n##################### Empty storage..");
-                    return;
-                }
-                values
-            } else {
-                log::info!("Cannot retrive value from offchain storage...");
-                // TODO:
-                return;
-            };
+            // All failed requests in this offchain worker
+            let mut failed_requests = VecDeque::new();
 
-            log::info!("\n\n====================\nOffchain worker started\n=================\n");
+            let rewrite_status =
+                db_reader.mutate::<Vec<SnapshotInfo<T>>, (), _>(|claim_requests| {
+                    match claim_requests {
+                        Ok(Some(claim_requests)) => {
+                            log::info!(
+                                "For block {:?} there are {} claim requests to process",
+                                block_number,
+                                claim_requests.len()
+                            );
 
-            log::info!(
-                "For block {:?}. Storage have {} items",
-                block_number,
-                all_values.len()
-            );
+                            for claim in claim_requests.into_iter() {
+                                let claim_status = Self::process_claim_requests(claim.clone());
+
+                                if claim_status.is_ok() {
+                                    log::info!(
+                                        "Claim request for ice: {:?} passed..",
+                                        claim.ice_address
+                                    );
+                                } else {
+                                    log::info!(
+                                        "Claim request for \nice_address: {:?}\nicon_address: {:?}",
+                                        claim.ice_address,
+                                        claim.icon_address
+                                    );
+
+                                    // add to failed queue
+                                    failed_requests.push_back(claim);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            log::info!("Nothing is stored in claim request key.");
+                        }
+                        Err(err) => {
+                            log::info!(
+                                "db_reader.mutate error on claim requests. Error: {:?}",
+                                err
+                            );
+                        }
+                    }
+
+                    // always clear this block storage at last
+                    Ok(sp_std::vec![])
+                });
+
+            // save all the failed requests in seperate storage key
+            Self::save_failed_requests(failed_requests);
+
+            if rewrite_status.is_err() {
+                panic!("Rewrite status panic");
+            }
 
             log::info!("\n\n====================\nOffchain worker completed\n=================\n");
         }
@@ -397,14 +389,141 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        fn get_storage_key(current_block_number: &T::BlockNumber) -> Vec<u8> {
-            let last_master_block = {
-                let is_ahead_by = *current_block_number % crate::BATCHING_BLOCK.into();
+        fn process_claim_requests(snapshot: SnapshotInfo<T>) -> Result<(), ()> {
+            let server_response = Self::fetch_from_server(&snapshot);
 
-                current_block_number
-                    .checked_sub(&is_ahead_by)
-                    .unwrap_or_default()
+            // if this icon address do not exists in server just return
+            // pretrnding that the requests succeed
+            if let Err(Error::<T>::NoDataInServer) = server_response {
+                log::info!(
+                    "Data for icon_address: {:?} do not exists in remote server",
+                    snapshot.icon_address
+                );
+
+                // This much for this snapshot.
+                // pretend we succed.
+                return Ok(());
+            }
+
+            // TODO:
+            // Exhaustive Error handeling
+
+            // TODO:
+            // transfer_balance
+
+            Ok(())
+        }
+
+        fn fetch_from_server(snapshot: &SnapshotInfo<T>) -> Result<ServerResponse, Error<T>> {
+            let request_url = parity_scale_codec::alloc::string::String::from_utf8(
+                b"http://35.175.202.72:5000/claimDetails?address="
+                    .iter()
+                    .chain(&snapshot.icon_address)
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|err| {
+                log::info!("Error while encoding dynamic url. Error: {}", err);
+                Error::DeserializeToStrError
+            })?;
+
+            let request = http::Request::get(&request_url);
+            let timeout =
+                sp_io::offchain::timestamp().add(Duration::from_millis(FETCH_TIMEOUT_PERIOD));
+
+            log::info!("Initilizing pending variable...");
+            let pending = request
+                .deadline(timeout) // Setting the timeout time
+                .send() // Sending the request out by the host
+                .map_err(|e| {
+                    log::info!("Error while waiting for pending request{:?}", e);
+                    Error::HttpFetchingError
+                })?;
+
+            log::info!("Initilizing response variable...");
+            let response = pending
+                .try_wait(timeout)
+                .map_err(|_| Error::HttpFetchingError)?
+                .map_err(|_| Error::HttpFetchingError)?;
+
+            if response.code != 200 {
+                log::info!("Unexpected HTTP request status code: {}", response.code);
+                return Err(Error::HttpFetchingError);
             };
+
+            let response_bytes = response.body().collect::<Vec<u8>>();
+            let deserialize_to_response =
+                serde_json::from_slice::<ServerResponse>(response_bytes.as_slice());
+
+            // First try to deserialize body to ServerResponse which is the actual data we need,
+            // if that fails, try to deserialize into ServerResponseError type which consist and
+            // exhaustive list of all possible error returned by server
+            // and furthemore if that also failes, giveup with DeserializeToObjError
+            match deserialize_to_response {
+                Ok(response) => Ok(response),
+                Err(err) => {
+                    log::info!("Deserialize into ServerResponse failed with error: {}", err);
+                    let deserialixe_to_error = serde_json::from_slice::<crate::ServerResponseError>(
+                        response_bytes.as_slice(),
+                    );
+                    match deserialixe_to_error {
+                        Ok(error) => match error {
+                            crate::ServerResponseError::NoData => Err(Error::<T>::NoDataInServer),
+                            _ => Err(Error::<T>::HttpFetchingError),
+                        },
+                        Err(err) => {
+                            log::info!(
+                                "Cannot deserialize into error either. Error: {}. Failing...",
+                                err
+                            );
+                            Err(Error::<T>::DeserializeToObjError)
+                        }
+                    }
+                }
+            }
+        }
+
+        fn get_master_block(current_block_number: &T::BlockNumber) -> T::BlockNumber {
+            let is_ahead_by = *current_block_number % crate::BATCHING_BLOCK.into();
+
+            current_block_number
+                .checked_sub(&is_ahead_by)
+                .unwrap_or_default()
+        }
+
+        fn save_failed_requests(mut failed_claims: VecDeque<SnapshotInfo<T>>) {
+            if failed_claims.is_empty() {
+                return;
+            }
+
+            let key = SNAPSHOT_STORAGE_KEY
+                .iter()
+                .chain(b"failed-claims")
+                .cloned()
+                .collect::<Vec<u8>>();
+            let db_writer = StorageValueRef::persistent(&key);
+
+            let write_status =
+                db_writer.mutate::<VecDeque<_>, (), _>(|prev_claims| match prev_claims {
+                    Ok(Some(mut prev_claims)) => {
+                        prev_claims.append(&mut failed_claims);
+                        log::info!("Appended in failed requests queue...");
+                        Ok(prev_claims)
+                    }
+                    Ok(None) => Ok(failed_claims),
+                    Err(err) => {
+                        log::info!("Failed claims getter failed with {:?}", err);
+                        Err(())
+                    }
+                });
+
+            if write_status.is_err() {
+                panic!("Failed to write in failed_claims....");
+            }
+        }
+
+        fn get_storage_key(current_block_number: &T::BlockNumber) -> Vec<u8> {
+            let last_master_block = Self::get_master_block(&current_block_number);
 
             SNAPSHOT_STORAGE_KEY
                 .iter()
@@ -463,11 +582,3 @@ pub mod pallet {
         }
     }
 }
-
-// Step 1: fetch from offchain db: fetch_from_offchain_db()
-// Step 2: for each wallet, pull from external server: fetch_from_remote()
-// Step 3: Transfer to fetched ice_address with fetched amount
-
-// TODO: @asmee: Optimize offchain db for many claim entries: maybe keep different ids for each 100 claims
-//       @sudip: Or maybe just keep everything inside single key id? One seeming downside is that offchain storage may possible become large if lots of claims are made within single node. Anyway as offchain db is maintained with key/value pair i.e accessing an element from db with key is always O(0). If above-mentioned optimization needed to be done, instead maybe just process 100 iteration in offchain worker loop?
-// TODO: pop from the storage
