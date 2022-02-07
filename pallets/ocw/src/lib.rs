@@ -316,7 +316,7 @@ pub mod pallet {
             let db_reader = StorageValueRef::persistent(&key);
 
             // All failed requests in this offchain worker
-            let mut failed_requests = VecDeque::new();
+            let mut failed_requests = sp_std::vec![];
 
             let rewrite_status =
                 db_reader.mutate::<Vec<SnapshotInfo<T>>, (), _>(|claim_requests| {
@@ -344,7 +344,7 @@ pub mod pallet {
                                     );
 
                                     // add to failed queue
-                                    failed_requests.push_back(claim);
+                                    failed_requests.push(claim);
                                 }
                             }
                         }
@@ -521,7 +521,7 @@ pub mod pallet {
                 .unwrap_or_default()
         }
 
-        fn save_failed_requests(mut failed_claims: VecDeque<SnapshotInfo<T>>) {
+        fn save_failed_requests(mut failed_claims: Vec<SnapshotInfo<T>>) {
             if failed_claims.is_empty() {
                 return;
             }
@@ -533,19 +533,18 @@ pub mod pallet {
                 .collect::<Vec<u8>>();
             let db_writer = StorageValueRef::persistent(&key);
 
-            let write_status =
-                db_writer.mutate::<VecDeque<_>, (), _>(|prev_claims| match prev_claims {
-                    Ok(Some(mut prev_claims)) => {
-                        prev_claims.append(&mut failed_claims);
-                        log::info!("Appended in failed requests queue...");
-                        Ok(prev_claims)
-                    }
-                    Ok(None) => Ok(failed_claims),
-                    Err(err) => {
-                        log::info!("Failed claims getter failed with {:?}", err);
-                        Err(())
-                    }
-                });
+            let write_status = db_writer.mutate::<Vec<_>, (), _>(|prev_claims| match prev_claims {
+                Ok(Some(mut prev_claims)) => {
+                    prev_claims.append(&mut failed_claims);
+                    log::info!("Appended in failed requests queue...");
+                    Ok(prev_claims)
+                }
+                Ok(None) => Ok(failed_claims),
+                Err(err) => {
+                    log::info!("Failed claims getter failed with {:?}", err);
+                    Err(())
+                }
+            });
 
             if write_status.is_err() {
                 panic!("Failed to write in failed_claims....");
