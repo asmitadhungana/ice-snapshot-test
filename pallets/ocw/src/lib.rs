@@ -10,14 +10,29 @@ use sp_std::vec::Vec;
 
 pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
+
+
 #[frame_support::pallet]
 pub mod pallet {
-    // pub use crate::{ServerResponse, SnapshotInfo, SNAPSHOT_STORAGE_KEY};
+    use sp_runtime::traits::AccountIdConversion;
+    use sp_runtime::traits::Saturating;
     pub use crate::SNAPSHOT_STORAGE_KEY;
 
     use core::convert::TryInto;
+    
     use frame_support::error::LookupError;
-    use frame_support::pallet_prelude::*;
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{
+            Currency, 
+            tokens::ExistenceRequirement, 
+            OnUnbalanced, 
+            ReservableCurrency, 
+            Get,
+        },
+        PalletId    // Apparently, ModuleId is no longer defined in sp_runtime : DISCORD ?
+    };
+
     use frame_system::{
         offchain::{
             AppCrypto, CreateSignedTransaction, SendSignedTransaction, SendUnsignedTransaction,
@@ -45,6 +60,7 @@ pub mod pallet {
     use serde::{Deserialize, Deserializer};
 
     pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"shot");
+
     const NUM_VEC_LEN: usize = 10;
     /// The type to sign and send transactions.
     const UNSIGNED_TXS_PRIORITY: u64 = 100;
@@ -54,6 +70,11 @@ pub mod pallet {
     const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
     const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
     const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
+
+    type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
+    type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
+    type NegativeImbalanceOf<T> =
+        <<T as Config>::Currency as Currency<AccountIdOf<T>>>::NegativeImbalance;
 
     pub mod crypto {
         use crate::KEY_TYPE;
@@ -92,7 +113,7 @@ pub mod pallet {
 
     #[derive(Encode, Decode, Clone, RuntimeDebug, scale_info::TypeInfo)]
     #[scale_info(skip_type_params(T))]
-    pub struct SnapshotInfo<T: Config> {
+    pub struct _SnapshotInfo<T: Config> {
         icon_address: Vec<u8>,
         ice_address: Option<<T as frame_system::Config>::AccountId>,
         amount: u32,
@@ -101,12 +122,26 @@ pub mod pallet {
         claim_status: bool,
     }
 
+    #[derive(Encode, Decode, Clone, RuntimeDebug, scale_info::TypeInfo)]
+    #[scale_info(skip_type_params(T))]
+    pub struct SnapshotInfo<T: Config> {
+        icon_address: Vec<u8>,
+        ice_address: Option<<T as frame_system::Config>::AccountId>,
+        amount: BalanceOf<T>,
+        defi_user: bool,
+        vesting_percentage: u32,
+        claim_status: bool,
+    }
+
+
+     //  Uncommenting this implementation results in ERROR due to amount being initialised as an integer:: 
+     //  TODO: Convert the amount value to 0 of type BalanceOf 
     impl<T: Config> Default for SnapshotInfo<T> {
         fn default() -> Self {
             Self {
                 ice_address: None,
                 icon_address: sp_std::vec![],
-                amount: 0,
+                amount: Self::u32_to_balance(0),
                 defi_user: false,
                 vesting_percentage: 0,
                 claim_status: false,
@@ -122,8 +157,6 @@ pub mod pallet {
         amount: u32,
         defi_user: bool,
         vesting_percentage: u32,
-        // TODO:
-        // specify all fields
     }
 
     // implement builder pattern
@@ -138,7 +171,7 @@ pub mod pallet {
             self
         }
 
-        pub fn amount(mut self, val: u32) -> Self {
+        pub fn amount(mut self, val: BalanceOf<T>) -> Self {
             self.amount = val;
             self
         }
@@ -157,6 +190,10 @@ pub mod pallet {
             self.claim_status = val;
             self
         }
+
+        pub fn u32_to_balance(input: u32) -> BalanceOf<T> {
+            input.into()
+        }   
     }
 
     #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, scale_info::TypeInfo)]
@@ -182,13 +219,36 @@ pub mod pallet {
         Ok(s.as_bytes().to_vec())
     }
 
+    #[pallet::genesis_config]
+	pub struct GenesisConfig;
+
+	#[cfg(feature = "std")]
+	impl Default for GenesisConfig {
+		fn default() -> Self {
+			Self
+		}
+	}
+
+	#[pallet::genesis_build]
+	impl<T: Config> GenesisBuild<T> for GenesisConfig {
+		fn build(&self) {
+			// Create Treasury account
+			let account_id = <Pallet<T>>::account_id();
+			let min = T::Currency::minimum_balance();
+			if T::Currency::free_balance(&account_id) < min {
+				let _ = T::Currency::make_free_balance_be(&account_id, min);
+			}
+		}
+	}
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         NewNumber(Option<T::AccountId>, u64),
         NewServerCounter(Option<T::AccountId>, u32),
         IconAddressAddedToMap(Vec<u8>),
-        NewTransferMade(Option<T::AccountId>, Vec<u8>),
+        NewTransferMade(Option<T::AccountId>, Vec<u8>, BalanceOf<T>),
+        FundDeposited(T::AccountId, BalanceOf<T>),
     }
 
     #[pallet::config]
@@ -199,6 +259,11 @@ pub mod pallet {
         type Call: From<Call<Self>>;
         /// The identifier type for an offchain worker.
         type AuthorityId: AppCrypto<Self::Public, Self::Signature>;
+        /// The Currency handler for the ocw pallet
+        type Currency: Currency<Self::AccountId> + ReservableCurrency<Self::AccountId>;
+        // The ocw pallet id, used for deriving its soverign account ID.
+        #[pallet::constant]
+        type PalletId: Get<PalletId>;
     }
 
     #[pallet::pallet]
@@ -240,6 +305,7 @@ pub mod pallet {
         ClaimAlreadyMade,
         NoClaimForUser,
         IconAddressAlreadyExists,
+        DepositError,
     }
 
     #[pallet::hooks]
@@ -253,12 +319,13 @@ pub mod pallet {
                 .map_or(TX_TYPES, |bn: usize| (bn as u32) % TX_TYPES);
             if modu == 0 {
                 let mut temp_counter = <ServerCounter<T>>::get();
-                for x in 1..101 {
+                // Fetch 1000 entries from the offchain server
+                for x in 1..1001 {
                     log::info!("Loop index: {}", x);
                     temp_counter = temp_counter + 1;
                     let signer = Signer::<T, T::AuthorityId>::any_account();
 
-                    if x % 100 == 0 {
+                    if x % 1000 == 0 {
                         // TODO: Error Handling
                         let result = signer.send_signed_transaction(|_account| {
                             Call::submit_counter_signed {
@@ -282,6 +349,23 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
+        #[pallet::weight(10_000)]
+        pub fn deposit(
+            origin: OriginFor<T>,
+            #[pallet::compact] value: BalanceOf<T>
+        ) -> DispatchResult {
+            let funder = ensure_signed(origin)?;
+            // T::Currency::transfer(&who, &Self::account_id(), value)?;
+            T::Currency::transfer(&funder, &Self::account_id(), value, ExistenceRequirement::KeepAlive)?;
+            // T::Currency::reserve(&funder, value)
+			// 	.map_err(|_| Error::<T>::DepositError)?;
+
+            Self::deposit_event(Event::FundDeposited(funder, value));
+            Ok(())
+        }
+
+       
+
         #[pallet::weight(10_000)]
         pub fn claim_request(
             origin: OriginFor<T>,
@@ -311,13 +395,12 @@ pub mod pallet {
             // Transfer the amount to the sender
             Self::transfer_amount(
                 icon_to_snapshot.ice_address.clone().unwrap(),
-                icon_to_snapshot.amount,
+                icon_to_snapshot.amount.clone(),
             );
 
             log::info!("Claim Made for icon address: {:?} and with ice address: {:?}. Claim status changed to {:?}", icon_wallet.clone(), icon_to_snapshot.ice_address, icon_to_snapshot.claim_status );
-
-            Self::deposit_event(Event::NewTransferMade(Some(who), icon_wallet));
-
+            Self::deposit_event(Event::NewTransferMade(Some(who), icon_wallet, icon_to_snapshot.amount));
+            
             Ok(())
         }
 
@@ -335,10 +418,12 @@ pub mod pallet {
         pub fn add_icon_address_to_map(
             origin: OriginFor<T>,
             _icon_address: Vec<u8>,
-            _amount: u32,
+            _amount: BalanceOf<T>,
             _defi_user: bool,
             _vesting_percentage: u32,
         ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
             let icon_to_snapshot = <IceSnapshotMap<T>>::get(_icon_address.clone());
 
             // If this icx_address have already made an request
@@ -358,12 +443,10 @@ pub mod pallet {
 
             // insert generated snapshot
             <IceSnapshotMap<T>>::insert(_icon_address.clone(), new_snapshot);
-
             // emit success event
             Self::deposit_event(Event::IconAddressAddedToMap(
                 (_icon_address.clone()).to_vec(),
             ));
-
             log::info!("Snapshot added to IceSnapshotMap {:?}", _icon_address);
 
             Ok(())
@@ -371,6 +454,31 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// The account ID of the treasury pot.
+        ///
+        /// This actually does computation. If you need to keep using it, then make sure you cache the
+        /// value and only call this once.
+        pub fn account_id() -> T::AccountId {
+            T::PalletId::get().into_account()
+        }
+
+
+        /// Return the amount of money in the pot.
+        // The existential deposit is not part of the pot so oce pallet account never gets deleted.
+        pub fn pot() -> BalanceOf<T> {
+            T::Currency::free_balance(&Self::account_id())
+                // Must never be less than 0 but better be safe.
+                .saturating_sub(T::Currency::minimum_balance())
+        }
+
+        pub fn u32_to_balance(input: u32) -> BalanceOf<T> {
+            input.into()
+        }
+
+        pub fn balance_to_u32(input: BalanceOf<T>) -> Option<u32> {
+            TryInto::<u32>::try_into(input).ok()
+        }
+
         fn __process_claim_request(counter: &u32) -> Result<(), Error<T>> {
             let signer = Signer::<T, T::AuthorityId>::any_account();
 
@@ -385,12 +493,11 @@ pub mod pallet {
                 );
                 Call::add_icon_address_to_map {
                     icon_address: _server_response.icon_address.clone(),
-                    amount: _server_response.amount.clone(),
+                    amount: Self::u32_to_balance(_server_response.amount.clone()),
                     defi_user: _server_response.defi_user.clone(),
                     vesting_percentage: _server_response.vesting_percentage.clone(),
                 }
             });
-
             log::info!("Transfer details from server: {:?}", server_response);
 
             Ok(())
@@ -422,88 +529,6 @@ pub mod pallet {
             // so that it can return unique icon addresses for each counter
             return Ok(crate::generate_response(*counter as usize));
 
-            let sample_response = r##"{
-                "icon_address":"10001",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":10
-            }"##;
-            let sample_response_2 = r##"{
-                "icon_address":"10002",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":20
-            }"##;
-            let sample_response_3 = r##"{
-                "icon_address":"10003",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_4 = r##"{
-                "icon_address":"10004",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_5 = r##"{
-                "icon_address":"10005",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_6 = r##"{
-                "icon_address":"10006",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_7 = r##"{
-                "icon_address":"10007",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_8 = r##"{
-                "icon_address":"10008",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_9 = r##"{
-                "icon_address":"10009",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            let sample_response_10 = r##"{
-                "icon_address":"100010",
-                "amount":24928,
-                "defi_user":true,
-                "vesting_percentage":30
-            }"##;
-            if counter % 10 == 1 {
-                return Ok(sample_response.as_bytes().to_vec());
-            } else if counter % 10 == 2 {
-                return Ok(sample_response_2.as_bytes().to_vec());
-            } else if counter % 10 == 3 {
-                return Ok(sample_response_3.as_bytes().to_vec());
-            } else if counter % 10 == 4 {
-                return Ok(sample_response_4.as_bytes().to_vec());
-            } else if counter % 10 == 5 {
-                return Ok(sample_response_5.as_bytes().to_vec());
-            } else if counter % 10 == 6 {
-                return Ok(sample_response_6.as_bytes().to_vec());
-            } else if counter % 10 == 7 {
-                return Ok(sample_response_7.as_bytes().to_vec());
-            } else if counter % 10 == 8 {
-                return Ok(sample_response_8.as_bytes().to_vec());
-            } else if counter % 10 == 9 {
-                return Ok(sample_response_9.as_bytes().to_vec());
-            } else if counter % 10 == 0 {
-                return Ok(sample_response_10.as_bytes().to_vec());
-            }
-
             log::info!("Sending request to: {}", request_url);
 
             let request = http::Request::get(request_url);
@@ -512,8 +537,8 @@ pub mod pallet {
 
             log::info!("Initializing pending variable...");
             let pending = request
-                .deadline(timeout) // Setting the timeout time
-                .send() // Sending the request out by the host
+                .deadline(timeout)
+                .send()
                 .map_err(|e| {
                     log::info!("Error while waiting for pending request{:?}", e);
                     <Error<T>>::HttpFetchingError
@@ -530,15 +555,15 @@ pub mod pallet {
 
                 return Err(<Error<T>>::HttpFetchingError);
             }
-
             Ok(response.body().collect())
         }
 
-        fn transfer_amount(receiver: <T as frame_system::Config>::AccountId, amount: u32) {
+        fn transfer_amount(receiver: <T as frame_system::Config>::AccountId, amount: BalanceOf<T>) {
             // TODO:
             // implement transfer logic
+            let res = T::Currency::transfer(&Self::account_id(), &receiver, amount, ExistenceRequirement::KeepAlive);
             log::info!(
-                "Crediting account {:?} with amount of {} ",
+                "Crediting account {:?} with amount of {:?} ",
                 receiver,
                 amount
             );
