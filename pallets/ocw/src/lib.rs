@@ -282,7 +282,8 @@ pub mod pallet {
             let storage_key = Self::get_storage_key(&block_number);
             log::info!(
                 "Storage key: {:?} storred in block {:?}",
-                storage_key, block_number
+                storage_key,
+                block_number
             );
             sp_io::offchain_index::set(&storage_key, &this_block_data.encode());
         }
@@ -309,7 +310,8 @@ pub mod pallet {
             let key = Self::get_storage_key(&block_number);
             log::info!(
                 "[GET] Storage key: {:?} storred in block {:?}",
-                key, block_number
+                key,
+                block_number
             );
             let db_reader = StorageValueRef::persistent(&key);
 
@@ -543,10 +545,15 @@ pub mod pallet {
         }
 
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
-            let ice_to_snapshot = <IceSnapshotMap<T>>::get(&signer);
+            let is_new_map = <IceSnapshotMap<T>>::contains_key(&signer);
 
             // If this icx_address have already made an request
-            ensure!(ice_to_snapshot.is_none(), Error::<T>::ClaimAlreadyMade);
+            // return early
+            // note that we do not panic here because use should be able to do claim
+            // in multiple nodes ( if one node fails to process the request )
+            if !is_new_map {
+                return Ok(());
+            }
 
             // create a new snapshot to be inserted
             let new_snapshot = SnapshotInfo::default().icon_address(icon_addr.to_vec());
