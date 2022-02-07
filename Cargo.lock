@@ -3838,6 +3838,7 @@ version = "1.0.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "hex",
  "log",
  "parity-scale-codec",
  "parking_lot 0.11.2",

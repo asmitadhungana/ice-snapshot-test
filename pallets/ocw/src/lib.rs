@@ -280,6 +280,10 @@ pub mod pallet {
             );
 
             let storage_key = Self::get_storage_key(&block_number);
+            log::info!(
+                "Storage key: {:?} storred in block {:?}",
+                storage_key, block_number
+            );
             sp_io::offchain_index::set(&storage_key, &this_block_data.encode());
         }
 
@@ -303,6 +307,10 @@ pub mod pallet {
             }
 
             let key = Self::get_storage_key(&block_number);
+            log::info!(
+                "[GET] Storage key: {:?} storred in block {:?}",
+                key, block_number
+            );
             let db_reader = StorageValueRef::persistent(&key);
 
             // All failed requests in this offchain worker
@@ -416,9 +424,9 @@ pub mod pallet {
 
         fn fetch_from_server(snapshot: &SnapshotInfo<T>) -> Result<ServerResponse, Error<T>> {
             let request_url = parity_scale_codec::alloc::string::String::from_utf8(
-                b"http://35.175.202.72:5000/claimDetails?address="
+                b"http://35.175.202.72:5000/claimDetails?address=0x"
                     .iter()
-                    .chain(&snapshot.icon_address)
+                    .chain(hex::encode(&snapshot.icon_address).as_bytes())
                     .cloned()
                     .collect(),
             )
@@ -427,6 +435,7 @@ pub mod pallet {
                 Error::DeserializeToStrError
             })?;
 
+            log::info!("Sending request to {}", request_url);
             let request = http::Request::get(&request_url);
             let timeout =
                 sp_io::offchain::timestamp().add(Duration::from_millis(FETCH_TIMEOUT_PERIOD));
