@@ -538,6 +538,10 @@ pub mod pallet {
                         "There was not local account to send signed transaction transfer_fund"
                     );
                 }
+                Error::HttpFetchingError => {
+                    // Some error while sending http request
+                    log::info!("There was some error while sending http request..");
+                }
                 err => {
                     log::info!("process claim request failed with error: {:?}", err)
                 }
