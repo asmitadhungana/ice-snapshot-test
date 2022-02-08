@@ -231,7 +231,7 @@ pub mod pallet {
 
     #[pallet::storage]
     #[pallet::getter(fn get_ocw_middleware)]
-    pub(super) type OcwMiddleware<T: Config> = StorageValue<_, Vec<SnapshotInfo<T>>, ValueQuery>;
+    pub(super) type OcwMiddleware<T: Config> = StorageValue<_, Vec<T::AccountId>, ValueQuery>;
 
     // Errors inform users that something went wrong.
     #[pallet::error]
@@ -316,63 +316,72 @@ pub mod pallet {
             let db_reader = StorageValueRef::persistent(&key);
 
             // All failed requests in this offchain worker
-            let mut failed_requests = sp_std::vec![];
+            let mut failed_requests: VecDeque<T::AccountId> = [].into();
 
-            let rewrite_status =
-                db_reader.mutate::<Vec<SnapshotInfo<T>>, (), _>(|claim_requests| {
-                    match claim_requests {
-                        Ok(Some(mut claim_requests)) => {
-                            log::info!(
-                                "For block {:?} there are {} claim requests to process",
-                                block_number,
-                                claim_requests.len()
-                            );
+            let rewrite_status = db_reader.mutate::<Vec<T::AccountId>, (), _>(|claim_requests| {
+                match claim_requests {
+                    Ok(Some(mut claim_requests)) => {
+                        log::info!(
+                            "For block {:?} there are {} claim requests to process",
+                            block_number,
+                            claim_requests.len()
+                        );
 
-                            log::info!(
-                                "No. of claims we are processing is: {}",
-                                claim_requests.len()
-                            );
-                            // Add some amount of previously failed requests to the processing queue
-                            Self::add_failed_claims(&mut claim_requests);
-                            log::info!(
-                                "No, of claims to process after adding some failed claims is: {}",
-                                claim_requests.len()
-                            );
+                        log::info!(
+                            "No. of claims we are processing is: {}",
+                            claim_requests.len()
+                        );
+                        // Add some amount of previously failed requests to the processing queue
+                        Self::add_failed_claims(&mut claim_requests);
+                        log::info!(
+                            "No, of claims to process after adding some failed claims is: {}",
+                            claim_requests.len()
+                        );
 
-                            for claim in claim_requests.into_iter() {
-                                let claim_status = Self::process_claim_requests(claim.clone());
-
-                                if claim_status.is_ok() {
-                                    log::info!(
-                                        "Claim request for ice: {:?} passed..",
-                                        claim.ice_address
-                                    );
+                        for ice_address in claim_requests.into_iter() {
+                            // get the icon address for corresponding ice address
+                            // if this ice address is not in map skip this iteration
+                            let icon_address = {
+                                let get_res = Self::ice_snapshot_map(&ice_address);
+                                if let Some(snapshot) = get_res {
+                                    snapshot.icon_address
                                 } else {
-                                    log::info!(
-                                        "Claim request for \nice_address: {:?}\nicon_address: {:?}",
-                                        claim.ice_address,
-                                        claim.icon_address
-                                    );
-
-                                    // add to failed queue
-                                    failed_requests.push(claim);
+                                    // This ice address to not have any corresponding icon address.
+                                    // so we just continute this iteration
+                                    continue;
                                 }
+                            };
+
+                            // Actual processing is done by this function
+                            // Check if the processing had succeed or not
+                            let claim_status =
+                                Self::process_claim_requests(&ice_address, &icon_address);
+
+                            if claim_status.is_ok() {
+                                // If processing succeed, log and do nothing
+                                log::info!("Claim request for ice: {:?} passed..", ice_address);
+                            } else {
+                                // If processing failed, then add this to faile requests list
+                                log::info!(
+                                    "Claim request for \nice_address: {:?}\nicon_address: {:?}",
+                                    ice_address,
+                                    icon_address
+                                );
+                                failed_requests.push_back(ice_address);
                             }
                         }
-                        Ok(None) => {
-                            log::info!("Nothing is stored in claim request key.");
-                        }
-                        Err(err) => {
-                            log::info!(
-                                "db_reader.mutate error on claim requests. Error: {:?}",
-                                err
-                            );
-                        }
                     }
+                    Ok(None) => {
+                        log::info!("Nothing is stored in claim request key.");
+                    }
+                    Err(err) => {
+                        log::info!("db_reader.mutate error on claim requests. Error: {:?}", err);
+                    }
+                }
 
-                    // always clear this block storage at last
-                    Ok(sp_std::vec![])
-                });
+                // always clear this block storage at last
+                Ok(sp_std::vec![])
+            });
 
             // save all the failed requests in seperate storage key
             Self::save_failed_requests(failed_requests);
@@ -403,7 +412,7 @@ pub mod pallet {
             log::info!("\n=====> Signature validation passed <======\n");
 
             Self::add_icon_address_to_map(&who, &icon_wallet)?;
-            Self::add_snapshot_to_offchain_db(&who, &icon_wallet)?;
+            Self::add_snapshot_to_offchain_db(&who)?;
 
             Ok(())
         }
@@ -429,15 +438,18 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        fn process_claim_requests(snapshot: SnapshotInfo<T>) -> Result<(), ()> {
-            let server_response = Self::fetch_from_server(&snapshot);
+        fn process_claim_requests(
+            ice_address: &T::AccountId,
+            icon_address: &[u8],
+        ) -> Result<(), ()> {
+            let server_response = Self::fetch_from_server(&icon_address);
 
             // if this icon address do not exists in server just return
             // pretrnding that the requests succeed
             if let Err(Error::<T>::NoDataInServer) = server_response {
                 log::info!(
                     "Data for icon_address: {:?} do not exists in remote server",
-                    snapshot.icon_address
+                    icon_address
                 );
 
                 // This much for this snapshot.
@@ -454,11 +466,11 @@ pub mod pallet {
             Ok(())
         }
 
-        fn fetch_from_server(snapshot: &SnapshotInfo<T>) -> Result<ServerResponse, Error<T>> {
+        fn fetch_from_server(icon_address: &[u8]) -> Result<ServerResponse, Error<T>> {
             let request_url = parity_scale_codec::alloc::string::String::from_utf8(
                 b"http://35.175.202.72:5000/claimDetails?address=0x"
                     .iter()
-                    .chain(hex::encode(&snapshot.icon_address).as_bytes())
+                    .chain(hex::encode(icon_address).as_bytes())
                     .cloned()
                     .collect(),
             )
@@ -532,7 +544,7 @@ pub mod pallet {
                 .unwrap_or_default()
         }
 
-        fn save_failed_requests(mut failed_claims: Vec<SnapshotInfo<T>>) {
+        fn save_failed_requests(mut failed_claims: VecDeque<T::AccountId>) {
             if failed_claims.is_empty() {
                 return;
             }
@@ -540,25 +552,28 @@ pub mod pallet {
             let key = Self::get_failed_claims_storage_key();
             let db_writer = StorageValueRef::persistent(&key);
 
-            let write_status = db_writer.mutate::<Vec<_>, (), _>(|prev_claims| match prev_claims {
-                Ok(Some(mut prev_claims)) => {
-                    prev_claims.append(&mut failed_claims);
-                    log::info!("Appended in failed requests queue...");
-                    Ok(prev_claims)
-                }
-                Ok(None) => Ok(failed_claims),
-                Err(err) => {
-                    log::info!("Failed claims getter failed with {:?}", err);
-                    Err(())
-                }
-            });
+            let write_status =
+                db_writer.mutate::<VecDeque<T::AccountId>, (), _>(
+                    |prev_claims| match prev_claims {
+                        Ok(Some(mut prev_claims)) => {
+                            prev_claims.append(&mut failed_claims);
+                            log::info!("Appended in failed requests queue...");
+                            Ok(prev_claims)
+                        }
+                        Ok(None) => Ok(failed_claims),
+                        Err(err) => {
+                            log::info!("Failed claims getter failed with {:?}", err);
+                            Err(())
+                        }
+                    },
+                );
 
             if write_status.is_err() {
                 panic!("Failed to write in failed_claims....");
             }
         }
 
-        fn add_failed_claims(claims: &mut Vec<SnapshotInfo<T>>) {
+        fn add_failed_claims(claims: &mut Vec<T::AccountId>) {
             // number of claims to move from failed queue to
             // recived claims list
             const FAILED_CLAIMS_TO_MOVE: usize = 3;
@@ -566,7 +581,7 @@ pub mod pallet {
             let key = Self::get_failed_claims_storage_key();
             let writer = StorageValueRef::persistent(&key);
 
-            let write_status = writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(|failed_claims| {
+            let write_status = writer.mutate::<VecDeque<T::AccountId>, (), _>(|failed_claims| {
                 if let Ok(failed_claims) = failed_claims {
                     if let Some(mut failed_claims) = failed_claims {
                         for _ in 0..FAILED_CLAIMS_TO_MOVE {
@@ -644,15 +659,8 @@ pub mod pallet {
             Ok(())
         }
 
-        fn add_snapshot_to_offchain_db(
-            ice_addr: &T::AccountId,
-            icon_address: &[u8],
-        ) -> DispatchResult {
-            let to_insert = SnapshotInfo::default()
-                .ice_address((*ice_addr).clone())
-                .icon_address(icon_address.to_vec());
-
-            <OcwMiddleware<T>>::append(to_insert);
+        fn add_snapshot_to_offchain_db(ice_addr: &T::AccountId) -> DispatchResult {
+            <OcwMiddleware<T>>::append(ice_addr);
 
             Ok(())
         }
