@@ -453,9 +453,12 @@ pub mod pallet {
             reciver: T::AccountId,
             amount: u128,
         ) -> DispatchResult {
-            let who = ensure_signed(origin);
+            let who = ensure_signed(origin)?;
 
-            // TODO: check if this sender can call the function
+            // make sure this is called from offchain worker
+            // by checking that this caller is kept in AuthorisedAccounts storage
+            let is_authorised = Self::ensure_genesis_account(&who);
+            ensure!(is_authorised, Error::<T>::AccessDenied);
 
             log::info!(
                 "Crediting account {:?} with amount {} unit",
@@ -697,6 +700,11 @@ pub mod pallet {
 
         fn is_batched_master_block(block_number: &T::BlockNumber) -> bool {
             *block_number % (crate::BATCHING_BLOCK.into()) == 0_u8.into()
+        }
+
+        #[inline(always)]
+        fn ensure_genesis_account(who: &T::AccountId) -> bool {
+            <AuthorisedAccounts<T>>::contains_key(who)
         }
     }
 
