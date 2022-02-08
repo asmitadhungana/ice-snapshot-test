@@ -136,7 +136,7 @@ pub mod pallet {
     pub struct ServerResponse {
         #[serde(deserialize_with = "de_string_to_bytes")]
         icon_address: Vec<u8>,
-        amount: u32,
+        amount: u128,
         defi_user: bool,
         vesting_percentage: u32,
         // TODO:
@@ -471,32 +471,79 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        fn send_signed_tx(call: Call<T>) -> Result<(), Error<T>> {
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+            let call_result = signer.send_signed_transaction(move |_signing_account| call.clone());
+
+            match call_result {
+                Some((_account, res)) => {
+                    if res.is_ok() {
+                        Ok(())
+                    } else {
+                        Err(Error::<T>::OffchainSignedTxError)
+                    }
+                }
+                None => Err(Error::<T>::NoLocalAcctForSigning),
+            }
+        }
+
         fn process_claim_requests(
             ice_address: &T::AccountId,
             icon_address: &[u8],
         ) -> Result<(), ()> {
-            let server_response = Self::fetch_from_server(&icon_address);
+            let fetch_res = Self::fetch_from_server(&icon_address);
 
-            // if this icon address do not exists in server just return
-            // pretrnding that the requests succeed
-            if let Err(Error::<T>::NoDataInServer) = server_response {
-                log::info!(
-                    "Data for icon_address: {:?} do not exists in remote server",
-                    icon_address
-                );
+            let claim_error;
+            match fetch_res {
+                Ok(server_response) => {
+                    log::info!(
+                        "Server reponse for icon_address {:?} is: {:#?}",
+                        icon_address,
+                        server_response
+                    );
 
-                // This much for this snapshot.
-                // pretend we succed.
-                return Ok(());
+                    // Call the helper function to send fund through extrinsic
+                    let transfer_res = Self::send_signed_tx(Call::transfer_fund {
+                        reciver: (*ice_address).clone(),
+                        amount: server_response.amount,
+                    });
+
+                    if let Err(err) = transfer_res {
+                        claim_error = err;
+                    } else {
+                        return Ok(());
+                    }
+                }
+
+                Err(err) => {
+                    claim_error = err;
+                }
             }
 
-            // TODO:
-            // Exhaustive Error handeling
+            // If any of above process returns an error
+            match claim_error {
+                Error::NoDataInServer => {
+                    log::info!(
+                        "There is no data associated with icon_address: {:?} in server",
+                        icon_address
+                    );
+                }
+                Error::OffchainSignedTxError => {
+                    log::info!("Error while calling transfer_fund extrinsic");
+                }
+                Error::NoLocalAcctForSigning => {
+                    // this usually should not happen if we make sure to configure
+                    // some accounts in geneis config
+                    log::info!(
+                        "There was not local account to send signed transaction transfer_fund"
+                    );
+                }
+                err => {
+                    log::info!("process claim request failed with error: {:?}", err)
+                }
+            }
 
-            // TODO:
-            // transfer_balance
-
-            Ok(())
+            Err(())
         }
 
         fn fetch_from_server(icon_address: &[u8]) -> Result<ServerResponse, Error<T>> {
