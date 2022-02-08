@@ -321,10 +321,21 @@ pub mod pallet {
             let rewrite_status =
                 db_reader.mutate::<Vec<SnapshotInfo<T>>, (), _>(|claim_requests| {
                     match claim_requests {
-                        Ok(Some(claim_requests)) => {
+                        Ok(Some(mut claim_requests)) => {
                             log::info!(
                                 "For block {:?} there are {} claim requests to process",
                                 block_number,
+                                claim_requests.len()
+                            );
+
+                            log::info!(
+                                "No. of claims we are processing is: {}",
+                                claim_requests.len()
+                            );
+                            // Add some amount of previously failed requests to the processing queue
+                            Self::add_failed_claims(&mut claim_requests);
+                            log::info!(
+                                "No, of claims to process after adding some failed claims is: {}",
                                 claim_requests.len()
                             );
 
@@ -526,11 +537,7 @@ pub mod pallet {
                 return;
             }
 
-            let key = SNAPSHOT_STORAGE_KEY
-                .iter()
-                .chain(b"failed-claims")
-                .cloned()
-                .collect::<Vec<u8>>();
+            let key = Self::get_failed_claims_storage_key();
             let db_writer = StorageValueRef::persistent(&key);
 
             let write_status = db_writer.mutate::<Vec<_>, (), _>(|prev_claims| match prev_claims {
@@ -551,6 +558,43 @@ pub mod pallet {
             }
         }
 
+        fn add_failed_claims(claims: &mut Vec<SnapshotInfo<T>>) {
+            // number of claims to move from failed queue to
+            // recived claims list
+            const FAILED_CLAIMS_TO_MOVE: usize = 3;
+
+            let key = Self::get_failed_claims_storage_key();
+            let writer = StorageValueRef::persistent(&key);
+
+            let write_status = writer.mutate::<VecDeque<SnapshotInfo<T>>, (), _>(|failed_claims| {
+                if let Ok(failed_claims) = failed_claims {
+                    if let Some(mut failed_claims) = failed_claims {
+                        for _ in 0..FAILED_CLAIMS_TO_MOVE {
+                            if let Some(claim) = failed_claims.pop_front() {
+                                claims.push(claim);
+                            }
+                        }
+                        Ok(failed_claims)
+                    } else {
+                        log::info!("There is nothing in failed claims storage...");
+                        Ok([].into())
+                    }
+                } else {
+                    log::info!("Couldn't read failed requests storage..");
+                    Err(())
+                }
+            });
+
+            if write_status.is_ok() {
+                log::info!("Couldn't add faled claims to processing vector...");
+            } else {
+                log::info!(
+                    "Added {} failed claims to processing claims",
+                    FAILED_CLAIMS_TO_MOVE
+                );
+            }
+        }
+
         fn get_storage_key(current_block_number: &T::BlockNumber) -> Vec<u8> {
             let last_master_block = Self::get_master_block(&current_block_number);
 
@@ -560,6 +604,14 @@ pub mod pallet {
                 .chain(last_master_block.encode().as_slice())
                 .cloned()
                 .collect()
+        }
+
+        fn get_failed_claims_storage_key() -> Vec<u8> {
+            SNAPSHOT_STORAGE_KEY
+                .iter()
+                .chain(b"failed-claims")
+                .cloned()
+                .collect::<Vec<u8>>()
         }
 
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
