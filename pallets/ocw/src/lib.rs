@@ -16,25 +16,34 @@ pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
 #[frame_support::pallet]
 pub mod pallet {
-    // pub use crate::{ServerResponse, SnapshotInfo, SNAPSHOT_STORAGE_KEY};
     pub use crate::SNAPSHOT_STORAGE_KEY;
 
     use core::convert::TryInto;
-    use frame_support::pallet_prelude::*;
-    use frame_support::storage::IterableStorageDoubleMap;
-    use frame_support::{dispatch::DispatchResult, error::LookupError};
-    use frame_system::RawOrigin;
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{
+            Currency,
+            tokens::ExistenceRequirement, 
+            OnUnbalanced, 
+            ReservableCurrency, 
+            Get,
+        },
+        storage::IterableStorageDoubleMap,
+        PalletId,
+        dispatch::DispatchResult, 
+        error::LookupError,
+    };
     use frame_system::{
         offchain::{
             AppCrypto, CreateSignedTransaction, SendSignedTransaction, SendUnsignedTransaction,
             SignedPayload, Signer, SigningTypes, SubmitTransaction,
         },
         pallet_prelude::*,
+        RawOrigin,
     };
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Deserializer};
     use sp_core::{crypto::KeyTypeId, hexdisplay::AsBytesRef};
-    use sp_runtime::offchain::http::PendingRequest;
     use sp_runtime::{
         offchain::{
             http,
@@ -42,13 +51,10 @@ pub mod pallet {
             storage_lock::{BlockAndTime, StorageLock},
             Duration,
         },
-        traits::BlockNumberProvider,
-        transaction_validity::{
-            InvalidTransaction, TransactionSource, TransactionValidity, ValidTransaction,
-        },
+        traits::{BlockNumberProvider, AccountIdConversion, Saturating, SaturatedConversion},
         RuntimeDebug,
     };
-    use sp_std::{collections::vec_deque::VecDeque, vec::Vec};
+    use sp_std::{vec::Vec};
 
     const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
 
@@ -60,15 +66,18 @@ pub mod pallet {
     /// `KeyTypeId` via the keystore to sign the transaction.
     /// The keys can be inserted manually via RPC (see `author_insertKey`).
     pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"shot");
-    const NUM_VEC_LEN: usize = 10;
-    /// The type to sign and send transactions.
-    const UNSIGNED_TXS_PRIORITY: u64 = 100;
+    // const NUM_VEC_LEN: usize = 10;
+    // /// The type to sign and send transactions.
+    // const UNSIGNED_TXS_PRIORITY: u64 = 100;
 
     // const HTTP_REMOTE_REQUEST: &str = "http://0.0.0.0:8000/test.html";
 
     const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
-    const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
-    const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
+    // const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
+    // const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
+
+    type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
+    type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
 
     pub mod crypto {
         use crate::KEY_TYPE;
@@ -103,16 +112,15 @@ pub mod pallet {
         }
     }
 
-    // type AccountOf<T> = <T as frame_system::Config>::AccountId;
-
     #[derive(Encode, Decode, Clone, RuntimeDebug, scale_info::TypeInfo)]
     #[scale_info(skip_type_params(T))]
     pub struct SnapshotInfo<T: Config> {
         icon_address: Vec<u8>,
         ice_address: <T as frame_system::Config>::AccountId,
-        amount: u32,
+        amount: BalanceOf<T>,
         defi_user: bool,
         vesting_percentage: u32,
+        claim_status: bool,
     }
 
     impl<T: Config> Default for SnapshotInfo<T> {
@@ -120,9 +128,10 @@ pub mod pallet {
             Self {
                 ice_address: <T as frame_system::Config>::AccountId::default(),
                 icon_address: sp_std::vec![],
-                amount: 0,
+                amount: Self::u128_to_balance_saturated(10000),
                 defi_user: false,
                 vesting_percentage: 0,
+                claim_status: false,
             }
         }
     }
@@ -138,6 +147,7 @@ pub mod pallet {
         PartialEq,
         RuntimeDebug,
         scale_info::TypeInfo,
+        Copy
     )]
     pub struct ServerResponse {
         omm: u32,
@@ -159,7 +169,7 @@ pub mod pallet {
             self
         }
 
-        pub fn amount(mut self, val: u32) -> Self {
+        pub fn amount(mut self, val: BalanceOf<T>) -> Self {
             self.amount = val;
             self
         }
@@ -173,6 +183,10 @@ pub mod pallet {
             self.vesting_percentage = val;
             self
         }
+        
+        pub fn u128_to_balance_saturated(input: u128) -> BalanceOf<T> {
+            input.saturated_into()
+        }  
     }
 
     #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, scale_info::TypeInfo)]
@@ -199,6 +213,14 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         SnapshotInfoAdded(T::AccountId, Vec<u8>),
+
+        // ADDED FOR TESTING PURPOSE
+        NewNumber(Option<T::AccountId>, u64),
+        NewServerCounter(Option<T::AccountId>, u32),
+        IconAddressAddedToMap(Vec<u8>),
+        NewTransferMade(Option<T::AccountId>, Vec<u8>, BalanceOf<T>),
+        PalletFundUpdated(BalanceOf<T>, BalanceOf<T>),
+        ReceiverTokenBalanceUpdated(BalanceOf<T>, BalanceOf<T>),
     }
 
     #[pallet::config]
@@ -209,6 +231,11 @@ pub mod pallet {
         type Call: From<Call<Self>>;
         /// The identifier type for an offchain worker.
         type AuthorityId: AppCrypto<Self::Public, Self::Signature>;
+        /// The Currency handler for the ocw pallet
+        type Currency: Currency<Self::AccountId> + ReservableCurrency<Self::AccountId>;
+        // The ocw pallet id, used for deriving its soverign account ID.
+        #[pallet::constant]
+        type PalletId: Get<PalletId>;
     }
 
     #[pallet::pallet]
@@ -246,6 +273,13 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
         fn build(&self) {
+            // Create Ocw-Pallet account
+			let pallet_account_id = <Pallet<T>>::pallet_account_id();
+			let min = T::Currency::minimum_balance();
+			if T::Currency::free_balance(&pallet_account_id) < min {
+				let _ = T::Currency::make_free_balance_be(&pallet_account_id, min);
+			}
+            // Set authorized accounts
             for account_id in &self.authorised_accounts {
                 <AuthorisedAccounts<T>>::insert(account_id, ());
             }
@@ -281,6 +315,12 @@ pub mod pallet {
         ClaimAlreadyMade,
         NoDataInServer,
         AccessDenied,
+
+        // ADDED FOR TESTING PURPOSE
+        NoClaimForUser,
+        DepositError,
+        TransferAmountError,
+
     }
 
     #[pallet::hooks]
@@ -384,13 +424,23 @@ pub mod pallet {
 
             // TODO: For now it is locally maintained list
             // use sudo in future
-            let is_authorised = <AuthorisedAccounts<T>>::contains_key(signer);
+            let is_authorised = <AuthorisedAccounts<T>>::contains_key(signer.clone());
             ensure!(is_authorised, Error::<T>::AccessDenied);
+
+            // === TEMP: JUST FOR TESTING === //
+            let before_pallet_balance = Self::pallet_fund();
+            let before_receiver_balance = T::Currency::free_balance(&signer)
+                .saturating_sub(T::Currency::minimum_balance());
+            // === TEMP: JUST FOR TESTING === //
 
             let transfer_status: DispatchResultWithPostInfo =
                 if let Some(transfer_details) = transfer_details {
                     // TODO:
                     // do actual transfer logic
+                    let transfer_res = T::Currency::transfer(&Self::pallet_account_id(), &ice_address, Self::u128_to_balance_saturated(transfer_details.balance.clone()), ExistenceRequirement::KeepAlive);
+                    if let Err(e) = transfer_res {
+                        log::error!("Transfer Amount Error {:?}", e);
+                    }
                     Ok(().into())
                 } else {
                     // if None is passed in server response then
@@ -398,9 +448,8 @@ pub mod pallet {
                     Ok(().into())
                 };
 
-            // TODO:
-            // update onchain data of SnapshotInfoMap with new data like
-            // de-fi user etc.
+            let defi_user =  &transfer_details.unwrap().defi_user;
+            Self::update_snapshot_map(&signer, &defi_user).unwrap();
 
             // At this point, transfer has been sucessfully made
             if transfer_status.is_ok() {
@@ -410,11 +459,40 @@ pub mod pallet {
                 log::info!("Transfer function failed. We will keep the data..");
             }
 
+            // === TEMP: JUST FOR TESTING === //
+            let remaining_pallet_balance = Self::pallet_fund();
+            let after_receiver_balance = T::Currency::free_balance(&signer)
+                .saturating_sub(T::Currency::minimum_balance());
+            Self::deposit_event(Event::PalletFundUpdated(before_pallet_balance, remaining_pallet_balance));
+            Self::deposit_event(Event::ReceiverTokenBalanceUpdated(before_receiver_balance, after_receiver_balance));
+            // === TEMP: JUST FOR TESTING === //
+
             transfer_status
         }
     }
 
     impl<T: Config> Pallet<T> {
+
+        // RETURNS THE PALLET'S ACCOUNT ID
+        pub fn pallet_account_id() -> T::AccountId {
+            T::PalletId::get().into_account()
+        }
+
+        // RETURNS THE TOKEN BALANCE OF THE PALLET ACCOUNT
+        pub fn pallet_fund() -> BalanceOf<T> {
+            T::Currency::free_balance(&Self::pallet_account_id())
+                // Must never be less than 0 but better be safe.
+                .saturating_sub(T::Currency::minimum_balance())
+        }
+
+        pub fn u128_to_balance_saturated(input: u128) -> BalanceOf<T> {
+            input.saturated_into()
+        }
+
+        pub fn balance_to_u128_saturated(input: BalanceOf<T>) -> u128 {
+            input.saturated_into::<u128>()
+        }
+
         fn add_icon_address_to_map(signer: &T::AccountId, icon_addr: &[u8]) -> DispatchResult {
             log::info!("Adding new entry to ice->snapshot map");
 
@@ -440,6 +518,22 @@ pub mod pallet {
         fn add_to_request_queue(ice_addr: &T::AccountId, icon_address: &[u8]) -> DispatchResult {
             // insert this request as fresh entry
             <PendingClaims<T>>::insert((*ice_addr).clone(), ());
+
+            Ok(())
+        }
+
+        fn update_snapshot_map(signer: &T::AccountId, defi_user: &bool) ->  DispatchResult {
+            let mut snapshotmap =
+                Self::get_ice_snapshot_map(&signer).ok_or(<Error<T>>::NoClaimForUser)?;
+            ensure!(
+                snapshotmap.claim_status == false,
+                <Error<T>>::ClaimAlreadyMade
+            );
+
+            snapshotmap.claim_status = true;
+            snapshotmap.defi_user = defi_user.clone();
+
+            <IceSnapshotMap<T>>::insert(&signer, snapshotmap);
 
             Ok(())
         }

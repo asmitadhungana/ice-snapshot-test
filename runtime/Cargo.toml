@@ -90,11 +90,6 @@ git = 'https://github.com/paritytech/substrate.git'
 tag = 'monthly-2021-10'
 version = '4.0.0-dev'
 
-[dependencies.pallet-example-offchain-worker]
-default-features = false
-version = '4.0.0-dev'
-path = '../pallets/example-offchain-worker'
-
 [dependencies.pallet-ocw]
 default-features = false
 version = '1.0.0'
@@ -228,7 +223,6 @@ std = [
 	'log/std',
 	'pallet-aura/std',
 	'pallet-balances/std',
-	'pallet-example-offchain-worker/std',
 	'pallet-grandpa/std',
 	'pallet-ocw/std',
 	'pallet-randomness-collective-flip/std',
