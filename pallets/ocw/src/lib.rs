@@ -219,7 +219,7 @@ pub mod pallet {
         NewServerCounter(Option<T::AccountId>, u32),
         IconAddressAddedToMap(Vec<u8>),
         NewTransferMade(Option<T::AccountId>, Vec<u8>, BalanceOf<T>),
-        PalletFundUpdated(BalanceOf<T>, BalanceOf<T>),
+        PalletFundUpdated(T::AccountId, BalanceOf<T>, BalanceOf<T>),
         ReceiverTokenBalanceUpdated(BalanceOf<T>, BalanceOf<T>),
     }
 
@@ -463,11 +463,27 @@ pub mod pallet {
             let remaining_pallet_balance = Self::pallet_fund();
             let after_receiver_balance = T::Currency::free_balance(&signer)
                 .saturating_sub(T::Currency::minimum_balance());
-            Self::deposit_event(Event::PalletFundUpdated(before_pallet_balance, remaining_pallet_balance));
+            Self::deposit_event(Event::PalletFundUpdated(Self::pallet_account_id(), before_pallet_balance, remaining_pallet_balance));
             Self::deposit_event(Event::ReceiverTokenBalanceUpdated(before_receiver_balance, after_receiver_balance));
             // === TEMP: JUST FOR TESTING === //
 
             transfer_status
+        }
+
+        #[pallet::weight(10_000)]
+        pub fn deposit(
+            origin: OriginFor<T>,
+            #[pallet::compact] value: BalanceOf<T>
+        ) -> DispatchResult {
+            let funder = ensure_signed(origin)?;
+            
+            let previous_pallet_balance = Self::pallet_fund();
+            let pallet_account = Self::pallet_account_id();
+            T::Currency::transfer(&funder, &pallet_account, value, ExistenceRequirement::KeepAlive)?;
+
+            let remaining_pallet_balance = Self::pallet_fund();
+            Self::deposit_event(Event::PalletFundUpdated(pallet_account, previous_pallet_balance, remaining_pallet_balance));
+            Ok(())
         }
     }
 
