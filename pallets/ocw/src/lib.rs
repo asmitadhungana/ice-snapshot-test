@@ -8,10 +8,6 @@ use sp_runtime::traits::BlockNumberProvider;
 use sp_runtime::RuntimeDebug;
 use sp_std::vec::Vec;
 
-// WARNING:
-// Other pallets may also use key of same name. For now, substrate recommend
-// to prefix with pallet-name. Otherwise two pallets will endup accssing
-// storage by same key which will override the data of another pallet
 pub const SNAPSHOT_STORAGE_KEY: &[u8] = b"pallet-ocw::claims";
 
 #[frame_support::pallet]
@@ -24,7 +20,6 @@ pub mod pallet {
         traits::{
             Currency,
             tokens::ExistenceRequirement, 
-            OnUnbalanced, 
             ReservableCurrency, 
             Get,
         },
@@ -57,21 +52,7 @@ pub mod pallet {
     use sp_std::{vec::Vec};
 
     const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
-
-    /// Defines application identifier for crypto keys of this module.
-    ///
-    /// Every module that deals with signatures needs to declare its unique identifier for
-    /// its crypto keys.
-    /// When an offchain worker is signing transactions it's going to request keys from type
-    /// `KeyTypeId` via the keystore to sign the transaction.
-    /// The keys can be inserted manually via RPC (see `author_insertKey`).
     pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"shot");
-    // const NUM_VEC_LEN: usize = 10;
-    // /// The type to sign and send transactions.
-    // const UNSIGNED_TXS_PRIORITY: u64 = 100;
-
-    // const HTTP_REMOTE_REQUEST: &str = "http://0.0.0.0:8000/test.html";
-
     const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
     // const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
     // const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
@@ -128,7 +109,7 @@ pub mod pallet {
             Self {
                 ice_address: <T as frame_system::Config>::AccountId::default(),
                 icon_address: sp_std::vec![],
-                amount: Self::u128_to_balance_saturated(10000),
+                amount: Self::u128_to_balance_saturated(0),
                 defi_user: false,
                 vesting_percentage: 0,
                 claim_status: false,
@@ -213,12 +194,6 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         SnapshotInfoAdded(T::AccountId, Vec<u8>),
-
-        // ADDED FOR TESTING PURPOSE
-        NewNumber(Option<T::AccountId>, u64),
-        NewServerCounter(Option<T::AccountId>, u32),
-        IconAddressAddedToMap(Vec<u8>),
-        NewTransferMade(Option<T::AccountId>, Vec<u8>, BalanceOf<T>),
         PalletFundUpdated(T::AccountId, BalanceOf<T>, BalanceOf<T>),
         ReceiverTokenBalanceUpdated(BalanceOf<T>, BalanceOf<T>),
     }
@@ -273,7 +248,7 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
         fn build(&self) {
-            // Create Ocw-Pallet account
+            // Create Ocw-Pallet account and fund it with minimum balance
 			let pallet_account_id = <Pallet<T>>::pallet_account_id();
 			let min = T::Currency::minimum_balance();
 			if T::Currency::free_balance(&pallet_account_id) < min {
@@ -312,15 +287,12 @@ pub mod pallet {
         DeserializeToStrError,
 
         OffchainStoreError,
+        // Error returned when user has already made a claim for airdrop tokens
         ClaimAlreadyMade,
         NoDataInServer,
         AccessDenied,
-
-        // ADDED FOR TESTING PURPOSE
+        // Error returned when user has no claim to airdrop tokens
         NoClaimForUser,
-        DepositError,
-        TransferAmountError,
-
     }
 
     #[pallet::hooks]
@@ -435,8 +407,7 @@ pub mod pallet {
 
             let transfer_status: DispatchResultWithPostInfo =
                 if let Some(transfer_details) = transfer_details {
-                    // TODO:
-                    // do actual transfer logic
+                    // Actual transfer logic
                     let transfer_res = T::Currency::transfer(&Self::pallet_account_id(), &ice_address, Self::u128_to_balance_saturated(transfer_details.balance.clone()), ExistenceRequirement::KeepAlive);
                     if let Err(e) = transfer_res {
                         log::error!("Transfer Amount Error {:?}", e);
@@ -448,6 +419,7 @@ pub mod pallet {
                     Ok(().into())
                 };
 
+            // Update snapshot map for the user
             let defi_user =  &transfer_details.unwrap().defi_user;
             Self::update_snapshot_map(&signer, &defi_user).unwrap();
 
@@ -545,7 +517,6 @@ pub mod pallet {
                 snapshotmap.claim_status == false,
                 <Error<T>>::ClaimAlreadyMade
             );
-
             snapshotmap.claim_status = true;
             snapshotmap.defi_user = defi_user.clone();
 
