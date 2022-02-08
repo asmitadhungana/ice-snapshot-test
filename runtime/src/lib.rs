@@ -370,7 +370,7 @@ construct_runtime!(
 		Sudo: pallet_sudo::{Pallet, Call, Config<T>, Storage, Event<T>},
 		// Include the custom logic from the pallet-template in the runtime.
 		TemplateModule: pallet_template::{Pallet, Call, Storage, Event<T>},
-		OcwDemo: pallet_ocw::{Pallet, Call, Storage, Event<T>},
+		OcwDemo: pallet_ocw::{Pallet, Call, Storage, Event<T>, Config<T>},
 		OcwExample: pallet_example_offchain_worker::{Pallet, Call, Storage, Event<T>, ValidateUnsigned},
 	}
 );

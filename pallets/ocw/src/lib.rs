@@ -233,6 +233,33 @@ pub mod pallet {
     #[pallet::getter(fn get_ocw_middleware)]
     pub(super) type OcwMiddleware<T: Config> = StorageValue<_, Vec<T::AccountId>, ValueQuery>;
 
+    #[pallet::storage]
+    pub(super) type AuthorisedAccounts<T: Config> =
+        StorageMap<_, Identity, T::AccountId, (), OptionQuery>;
+
+    #[pallet::genesis_config]
+    pub struct GenesisConfig<T: Config> {
+        pub authorised_accounts: sp_std::vec::Vec<T::AccountId>,
+    }
+
+    #[cfg(feature = "std")]
+    impl<T: Config> Default for GenesisConfig<T> {
+        fn default() -> Self {
+            Self {
+                authorised_accounts: sp_std::vec![],
+            }
+        }
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
+        fn build(&self) {
+            for account_id in &self.authorised_accounts {
+                <AuthorisedAccounts<T>>::insert(account_id, ());
+            }
+        }
+    }
+
     // Errors inform users that something went wrong.
     #[pallet::error]
     pub enum Error<T> {
@@ -260,6 +287,9 @@ pub mod pallet {
         // this indicate that given icon address do not exists in server
         // so we neither do transfer nor will save this as failed claim
         NoDataInServer,
+
+        //
+        AccessDenied,
     }
 
     #[pallet::hooks]
