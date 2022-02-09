@@ -456,6 +456,8 @@ pub mod pallet {
                         log::error!("Transfer Amount Error {:?}", e);
                         Err(Error::<T>::TransferFailed.into())
                     } else {
+                        log::info!("Transfer function succeed..");
+
                         // On succeed update the map & delete from queue
                         update_map(&transfer_details);
                         delete_from_queue();
