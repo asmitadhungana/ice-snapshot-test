@@ -16,17 +16,12 @@ pub mod pallet {
 
     use core::convert::TryInto;
     use frame_support::{
-        pallet_prelude::*,
-        traits::{
-            Currency,
-            tokens::ExistenceRequirement, 
-            ReservableCurrency, 
-            Get,
-        },
-        storage::IterableStorageDoubleMap,
-        PalletId,
-        dispatch::DispatchResult, 
+        dispatch::DispatchResult,
         error::LookupError,
+        pallet_prelude::*,
+        storage::IterableStorageDoubleMap,
+        traits::{tokens::ExistenceRequirement, Currency, Get, ReservableCurrency},
+        PalletId,
     };
     use frame_system::{
         offchain::{
@@ -46,16 +41,16 @@ pub mod pallet {
             storage_lock::{BlockAndTime, StorageLock},
             Duration,
         },
-        traits::{BlockNumberProvider, AccountIdConversion, Saturating, SaturatedConversion},
+        traits::{AccountIdConversion, BlockNumberProvider, SaturatedConversion, Saturating},
         RuntimeDebug,
     };
-    use sp_std::{vec::Vec};
+    use sp_std::vec::Vec;
 
     const CLAIMS_PROCESSING_PER_OCW_RUN: usize = 100;
     pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"shot");
     const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
-    // const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
-    // const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
+                                            // const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
+                                            // const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
 
     type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
     type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
@@ -128,7 +123,7 @@ pub mod pallet {
         PartialEq,
         RuntimeDebug,
         scale_info::TypeInfo,
-        Copy
+        Copy,
     )]
     pub struct ServerResponse {
         omm: u32,
@@ -164,10 +159,10 @@ pub mod pallet {
             self.vesting_percentage = val;
             self
         }
-        
+
         pub fn u128_to_balance_saturated(input: u128) -> BalanceOf<T> {
             input.saturated_into()
-        }  
+        }
     }
 
     #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, scale_info::TypeInfo)]
@@ -249,11 +244,11 @@ pub mod pallet {
     impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
         fn build(&self) {
             // Create Ocw-Pallet account and fund it with minimum balance
-			let pallet_account_id = <Pallet<T>>::pallet_account_id();
-			let min = T::Currency::minimum_balance();
-			if T::Currency::free_balance(&pallet_account_id) < min {
-				let _ = T::Currency::make_free_balance_be(&pallet_account_id, min);
-			}
+            let pallet_account_id = <Pallet<T>>::pallet_account_id();
+            let min = T::Currency::minimum_balance();
+            if T::Currency::free_balance(&pallet_account_id) < min {
+                let _ = T::Currency::make_free_balance_be(&pallet_account_id, min);
+            }
             // Set authorized accounts
             for account_id in &self.authorised_accounts {
                 <AuthorisedAccounts<T>>::insert(account_id, ());
@@ -399,68 +394,104 @@ pub mod pallet {
             let is_authorised = <AuthorisedAccounts<T>>::contains_key(signer.clone());
             ensure!(is_authorised, Error::<T>::AccessDenied);
 
+            // we will not longer use signer ( it is only used to verify who called this function )
+            // so we drop it here to make sure it doesn;t confuses with ice_address
+            sp_std::mem::drop(signer);
+
+            // make sure that claim_status is false
+            let already_claimed = Self::get_ice_snapshot_map(&ice_address)
+                .ok_or(<Error<T>>::NoClaimForUser)?
+                .claim_status;
+            ensure!(!already_claimed, <Error<T>>::ClaimAlreadyMade);
+
             // === TEMP: JUST FOR TESTING === //
             let before_pallet_balance = Self::pallet_fund();
-            let before_receiver_balance = T::Currency::free_balance(&signer)
+            let before_receiver_balance = T::Currency::free_balance(&ice_address)
                 .saturating_sub(T::Currency::minimum_balance());
             // === TEMP: JUST FOR TESTING === //
 
-            let transfer_status: DispatchResultWithPostInfo =
-                if let Some(transfer_details) = transfer_details {
-                    // Actual transfer logic
-                    let transfer_res = T::Currency::transfer(&Self::pallet_account_id(), &ice_address, Self::u128_to_balance_saturated(transfer_details.balance.clone()), ExistenceRequirement::KeepAlive);
+            let update_map = |server_response: &ServerResponse| {
+                if let Some(mut snapshot) = Self::get_ice_snapshot_map(&ice_address) {
+                    snapshot.defi_user = server_response.defi_user;
+                    <IceSnapshotMap<T>>::insert(&ice_address, snapshot);
+                }
+            };
+            let delete_from_queue = || {
+                <PendingClaims<T>>::remove(&ice_address);
+            };
+
+            match transfer_details {
+                None => {
+                    // empty transfer_details signifies just to remove from queue
+                    // eg: if icon address is not in server
+                    delete_from_queue();
+
+                    // But we simulate this as ok transaction
+                    Ok(().into())
+                }
+                Some(transfer_details) => {
+                    let transfer_res = T::Currency::transfer(
+                        &Self::pallet_account_id(),
+                        &ice_address,
+                        Self::u128_to_balance_saturated(transfer_details.balance.clone()),
+                        ExistenceRequirement::KeepAlive,
+                    );
                     if let Err(e) = transfer_res {
                         log::error!("Transfer Amount Error {:?}", e);
+                        Err(Error::<T>::TransferFailed.into())
+                    } else {
+                        // On succeed update the map & delete from queue
+                        update_map(&transfer_details);
+                        delete_from_queue();
+
+                        // === TEMP: JUST FOR TESTING === //
+                        let remaining_pallet_balance = Self::pallet_fund();
+                        let after_receiver_balance = T::Currency::free_balance(&ice_address)
+                            .saturating_sub(T::Currency::minimum_balance());
+                        Self::deposit_event(Event::PalletFundUpdated(
+                            Self::pallet_account_id(),
+                            before_pallet_balance,
+                            remaining_pallet_balance,
+                        ));
+                        Self::deposit_event(Event::ReceiverTokenBalanceUpdated(
+                            before_receiver_balance,
+                            after_receiver_balance,
+                        ));
+                        // === TEMP: JUST FOR TESTING === //
+
+                        Ok(().into())
                     }
-                    Ok(().into())
-                } else {
-                    // if None is passed in server response then
-                    // we just have to remove the entry
-                    Ok(().into())
-                };
-
-            // Update snapshot map for the user
-            let defi_user =  &transfer_details.unwrap().defi_user;
-            Self::update_snapshot_map(&signer, &defi_user).unwrap();
-
-            // At this point, transfer has been sucessfully made
-            if transfer_status.is_ok() {
-                <PendingClaims<T>>::remove(ice_address);
-                log::info!("Transfer function suceed and request have been removed frm queue");
-            } else {
-                log::info!("Transfer function failed. We will keep the data..");
+                }
             }
-
-            // === TEMP: JUST FOR TESTING === //
-            let remaining_pallet_balance = Self::pallet_fund();
-            let after_receiver_balance = T::Currency::free_balance(&signer)
-                .saturating_sub(T::Currency::minimum_balance());
-            Self::deposit_event(Event::PalletFundUpdated(Self::pallet_account_id(), before_pallet_balance, remaining_pallet_balance));
-            Self::deposit_event(Event::ReceiverTokenBalanceUpdated(before_receiver_balance, after_receiver_balance));
-            // === TEMP: JUST FOR TESTING === //
-
-            transfer_status
         }
 
         #[pallet::weight(10_000)]
         pub fn deposit(
             origin: OriginFor<T>,
-            #[pallet::compact] value: BalanceOf<T>
+            #[pallet::compact] value: BalanceOf<T>,
         ) -> DispatchResult {
             let funder = ensure_signed(origin)?;
-            
+
             let previous_pallet_balance = Self::pallet_fund();
             let pallet_account = Self::pallet_account_id();
-            T::Currency::transfer(&funder, &pallet_account, value, ExistenceRequirement::KeepAlive)?;
+            T::Currency::transfer(
+                &funder,
+                &pallet_account,
+                value,
+                ExistenceRequirement::KeepAlive,
+            )?;
 
             let remaining_pallet_balance = Self::pallet_fund();
-            Self::deposit_event(Event::PalletFundUpdated(pallet_account, previous_pallet_balance, remaining_pallet_balance));
+            Self::deposit_event(Event::PalletFundUpdated(
+                pallet_account,
+                previous_pallet_balance,
+                remaining_pallet_balance,
+            ));
             Ok(())
         }
     }
 
     impl<T: Config> Pallet<T> {
-
         // RETURNS THE PALLET'S ACCOUNT ID
         pub fn pallet_account_id() -> T::AccountId {
             T::PalletId::get().into_account()
@@ -510,19 +541,12 @@ pub mod pallet {
             Ok(())
         }
 
-        fn update_snapshot_map(signer: &T::AccountId, defi_user: &bool) ->  DispatchResult {
-            let mut snapshotmap =
-                Self::get_ice_snapshot_map(&signer).ok_or(<Error<T>>::NoClaimForUser)?;
-            ensure!(
-                snapshotmap.claim_status == false,
-                <Error<T>>::ClaimAlreadyMade
-            );
-            snapshotmap.claim_status = true;
-            snapshotmap.defi_user = defi_user.clone();
+        fn update_snapshot_map(signer: &T::AccountId, defi_user: bool) {
+            let mut snapshot = Self::get_ice_snapshot_map(&signer).unwrap();
+            snapshot.claim_status = true;
+            snapshot.defi_user = defi_user;
 
-            <IceSnapshotMap<T>>::insert(&signer, snapshotmap);
-
-            Ok(())
+            <IceSnapshotMap<T>>::insert(&signer, snapshot);
         }
 
         fn do_sample_claim() -> Result<(), Error<T>> {
