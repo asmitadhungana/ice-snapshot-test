@@ -420,6 +420,22 @@ pub mod pallet {
                 <PendingClaims<T>>::remove(&ice_address);
             };
 
+            // TMP
+            let print_balances = || {
+                let user_fund = T::Currency::free_balance(&ice_address)
+                    .saturating_sub(T::Currency::minimum_balance());
+                let pallet_fund = Self::pallet_fund();
+                log::info!(
+                    "System balance: {:?}\n {:?} balance: {:?}",
+                    pallet_fund,
+                    ice_address,
+                    user_fund
+                );
+            };
+
+            log::info!("\n\n Balances details before transfer");
+            print_balances();
+
             match transfer_details {
                 None => {
                     // empty transfer_details signifies just to remove from queue
@@ -443,6 +459,9 @@ pub mod pallet {
                         // On succeed update the map & delete from queue
                         update_map(&transfer_details);
                         delete_from_queue();
+
+                        log::info!("\n\n Balances details after transfer");
+                        print_balances();
 
                         // === TEMP: JUST FOR TESTING === //
                         let remaining_pallet_balance = Self::pallet_fund();
