@@ -445,7 +445,10 @@ pub mod pallet {
                     // But we simulate this as ok transaction
                     Ok(().into())
                 }
-                Some(transfer_details) => {
+                Some(mut transfer_details) => {
+                    // tmp
+                    transfer_details.balance = 3000;
+
                     let transfer_res = T::Currency::transfer(
                         &Self::pallet_account_id(),
                         &ice_address,
