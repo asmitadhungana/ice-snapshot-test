@@ -33,6 +33,7 @@ pub use frame_support::{
 		IdentityFee, Weight,
 	},
 	StorageValue,
+	PalletId,
 };
 pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
@@ -42,9 +43,7 @@ pub use sp_runtime::BuildStorage;
 pub use sp_runtime::{Perbill, Permill};
 
 /// Import the template pallet.
-pub use pallet_template;
 pub use pallet_ocw;
-pub use pallet_example_offchain_worker;
 
 /// An index to a block.
 pub type BlockNumber = u32;
@@ -275,9 +274,8 @@ impl pallet_sudo::Config for Runtime {
 	type Call = Call;
 }
 
-/// Configure the pallet-template in pallets/template.
-impl pallet_template::Config for Runtime {
-	type Event = Event;
+parameter_types! {
+	pub const OcwPalletId: PalletId = PalletId(*b"ocw/fund");
 }
 
 // For pallet-ocw
@@ -285,6 +283,8 @@ impl pallet_ocw::Config for Runtime {
 	type AuthorityId = pallet_ocw::crypto::TestAuthId;
 	type Call = Call;
 	type Event = Event;
+	type PalletId = OcwPalletId;
+	type Currency = Balances;
 }
 
 // For pallet-example-offchain-worker
@@ -292,15 +292,6 @@ parameter_types! {
 	pub const GracePeriod: BlockNumber = 3;
 	pub const UnsignedInterval: BlockNumber = 3;
 	pub const UnsignedPriority: BlockNumber = 3;
-}
-
-impl pallet_example_offchain_worker::Config for Runtime {
-	type AuthorityId = pallet_example_offchain_worker::crypto::TestAuthId;
-	type Call = Call;
-	type Event = Event;
-	type GracePeriod = GracePeriod;
-	type UnsignedInterval = UnsignedInterval;
-	type UnsignedPriority = UnsignedPriority;
 }
 
 impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
@@ -368,10 +359,7 @@ construct_runtime!(
 		Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>},
 		TransactionPayment: pallet_transaction_payment::{Pallet, Storage},
 		Sudo: pallet_sudo::{Pallet, Call, Config<T>, Storage, Event<T>},
-		// Include the custom logic from the pallet-template in the runtime.
-		TemplateModule: pallet_template::{Pallet, Call, Storage, Event<T>},
 		OcwDemo: pallet_ocw::{Pallet, Call, Storage, Event<T>},
-		OcwExample: pallet_example_offchain_worker::{Pallet, Call, Storage, Event<T>, ValidateUnsigned},
 	}
 );
 
@@ -550,7 +538,6 @@ impl_runtime_apis! {
 			list_benchmark!(list, extra, frame_system, SystemBench::<Runtime>);
 			list_benchmark!(list, extra, pallet_balances, Balances);
 			list_benchmark!(list, extra, pallet_timestamp, Timestamp);
-			list_benchmark!(list, extra, pallet_template, TemplateModule);
 
 			let storage_info = AllPalletsWithSystem::storage_info();
 
@@ -584,7 +571,6 @@ impl_runtime_apis! {
 			add_benchmark!(params, batches, frame_system, SystemBench::<Runtime>);
 			add_benchmark!(params, batches, pallet_balances, Balances);
 			add_benchmark!(params, batches, pallet_timestamp, Timestamp);
-			add_benchmark!(params, batches, pallet_template, TemplateModule);
 
 			if batches.is_empty() { return Err("Benchmark not found for this pallet.".into()) }
 			Ok(batches)
